@@ -1835,3 +1835,17 @@ footer a {
     transition: none !important;
   }
 }
+
+/* Shared processing status and browser-owned surfaces use the existing tokens. */
+:root { --scroll-thumb: var(--muted); --scroll-track: var(--panel-soft); scrollbar-color: var(--scroll-thumb) var(--scroll-track); scrollbar-width: thin; }
+*::-webkit-scrollbar { width: 10px; height: 10px; }
+*::-webkit-scrollbar-track { background: var(--scroll-track); }
+*::-webkit-scrollbar-thumb { background: var(--scroll-thumb); border: 2px solid var(--scroll-track); border-radius: 8px; }
+*::-webkit-scrollbar-thumb:hover { background: var(--accent); }
+*::-webkit-scrollbar-thumb:active { background: var(--primary); }
+@media (forced-colors: active) { :root { scrollbar-color: auto; } }
+.browser-processing { display: flex; align-items: center; gap: 16px; margin: 16px auto; padding: 16px 20px; max-width: 1200px; background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius); color: var(--text); }
+.browser-processing > div { flex: 1; min-width: 0; overflow-wrap: anywhere; }
+.browser-processing small { display: block; color: var(--muted); margin-top: 4px; }
+.browser-processing .text-link { flex-shrink: 0; }
+@media (max-width: 640px) { .browser-processing { margin: 12px; flex-wrap: wrap; } .browser-processing > div { flex-basis: 100%; } }

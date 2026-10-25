@@ -1,0 +1,10 @@
+{
+  "profile":"product-admin",
+  "sourceRoots":["app","components"],
+  "canonicalMap":"UX-CONTRACT.md",
+  "ownership":{"Select/Listbox":"native"},
+  "requiredCapabilities":["Select/Listbox","Form","Scrollbar","Toast","CRUD"],
+  "commands":{"typecheck":"npm run typecheck","unit":"npm run test:cloud","deployment":"npm run test:deployment","e2e":"npm run test:cloud-browser"},
+  "requiredCommands":["typecheck","unit","deployment","e2e"],
+  "evidence":{"crudFullFlow":"tests/cloud.spec.ts","failurePaths":"tests/cloud.test.ts"}
+}

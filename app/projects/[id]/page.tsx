@@ -12,6 +12,7 @@ import {
   Pause,
   Play,
 } from "lucide-react";
+import DeleteProjectDialog from "@/components/delete-project-dialog";
 import { useProject } from "@/components/project-hooks";
 import { api, languages, ready } from "@/lib/api";
 import { Button } from "@/components/ui/button";
@@ -25,6 +26,7 @@ export default function Dashboard({
   const [actionError, setError] = useState("");
   const [busy, setBusy] = useState(false);
   const [exportRights, setRights] = useState(false);
+  const [exportStatus, setExportStatus] = useState("");
   const router = useRouter();
   async function action(path: string, method = "POST", body?: unknown) {
     setBusy(true);
@@ -95,6 +97,7 @@ export default function Dashboard({
           <span style={{ width: (p.ready / p.pages.length) * 100 + "%" }} />
         </div>
         <p>
+          {p.execution_mode === "browser" && "Keep this tab open while translating. Closing it pauses unfinished work. "}
           Start reading as soon as the first page is ready. Every original is
           preserved.{" "}
           {p.pages.filter((page) => page.status === "completed").length}{" "}
@@ -114,7 +117,7 @@ export default function Dashboard({
           ) : (
             <Button
               variant="outline"
-              disabled={busy}
+              disabled={busy || (p.execution_mode === "browser" && p.ready === p.pages.length)}
               onClick={() =>
                 action("/projects/" + id + "/start", "POST", {
                   source_lang: p.source_lang,
@@ -127,7 +130,7 @@ export default function Dashboard({
               }
             >
               <Play size={15} />{" "}
-              {p.ready ? "Reprocess chapter" : "Start / resume translation"}
+              {p.execution_mode === "browser" ? "Start / resume translation" : p.ready ? "Reprocess chapter" : "Start / resume translation"}
             </Button>
           )}
           <a className="text-link" href={"/api/projects/" + id + "/metadata"}>
@@ -163,7 +166,7 @@ export default function Dashboard({
                   </p>
                 )}
               {page.error && <p className="error-text">{page.error}</p>}
-              {typeof page.metrics.completion === "string" && (
+              {p.execution_mode !== "browser" && typeof page.metrics.completion === "string" && (
                 <p className="hint">
                   {page.metrics.completion === "PARTIALLY_COMPLETED" ? "Partially completed" : "Completed"}: {String(page.metrics.completed_regions ?? 0)} rendered / {String(page.metrics.regions ?? 0)} candidates · {String(page.metrics.unresolved_regions ?? 0)} unresolved
                   <br />
@@ -187,7 +190,7 @@ export default function Dashboard({
                   Open Editor <Pencil size={15} />
                 </Link>
               )}
-              {!p.active && (
+              {!p.active && p.execution_mode !== "browser" && (
                 <Button
                   variant="outline"
                   disabled={busy}
@@ -228,7 +231,16 @@ export default function Dashboard({
           {["cbz", "zip", "pdf"].map((format) => (
             <a
               key={format}
-              aria-disabled={!exportRights || p.ready !== p.pages.length}
+              aria-disabled={busy || !exportRights || p.ready !== p.pages.length}
+              onClick={async (event) => {
+                if (p.execution_mode !== "browser") return;
+                event.preventDefault();
+                if (busy || !exportRights || p.ready !== p.pages.length) return;
+                setBusy(true); setError("");
+                try { const { exportCloud } = await import("@/lib/browser-pages"); await exportCloud(p, format, setExportStatus); }
+                catch (cause) { setError((cause as Error).message); }
+                finally { setBusy(false); setExportStatus(""); }
+              }}
               className={
                 "button outline " +
                 (!exportRights || p.ready !== p.pages.length ? "disabled" : "")
@@ -248,26 +260,8 @@ export default function Dashboard({
           ))}
         </div>
       </div>
-      <button
-        className="text-link danger"
-        disabled={p.active || busy}
-        onClick={async () => {
-          if (
-            confirm("Delete this chapter, all images and edits permanently?")
-          ) {
-            setBusy(true);
-            try {
-              await api("/projects/" + id, { method: "DELETE" });
-              router.push("/projects");
-            } catch (e) {
-              setError((e as Error).message);
-              setBusy(false);
-            }
-          }
-        }}
-      >
-        <Trash2 size={15} /> Delete project
-      </button>
+      {exportStatus && <p role="status" className="hint">{exportStatus}</p>}
+      <DeleteProjectDialog id={id} title={p.title} disabled={p.active || busy} onDeleted={() => router.push("/projects")} />
     </main>
   );
 }

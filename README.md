@@ -68,34 +68,45 @@ The Docker definition has been statically validated. The host's Docker daemon wa
 
 ## One repository import, one Vercel project
 
-Import [DrewWakefield10/mangalens](https://github.com/DrewWakefield10/mangalens) **once**, using the repository root. Next.js now lives at the root; there is no separate frontend import. Browser requests remain relative `/api/...` and are rewritten directly to the existing persistent FastAPI host on the same public domain.
+Import the repository root into Vercel with the Next.js preset, Node 24.x,
+`npm ci`, `npm run build` and the default `.next` output. Without an explicit
+`API_INTERNAL_URL`, Vercel uses the included browser processing API.
 
-**This supports one Vercel project, with an external processing backend. It is not a self-contained Vercel deployment.** The API, durable worker, database, image storage and local OCR/translation models must continue running on a persistent host. DeepL and OCR.space do not replace storage, image cleaning, typesetting or the worker. No new service has been provisioned or provider added.
+The free hosted configuration uses Vercel + Supabase + DeepL API Free +
+OCR.space's free endpoint. No Python host, worker or running owner PC is needed.
+Visitors must keep a browser tab open while translating. Interrupted work can be
+resumed from the chapter page. This is a smaller pipeline than the Python mode:
+cloud OCR, DeepL translation, conservative white-background cleanup, browser
+rendering and exports. Every page requires manual review.
 
-| Vercel setting | Value |
+Server-only Vercel variables (Production and Preview):
+
+| Variable | Purpose |
 | --- | --- |
-| Framework Preset | Next.js |
-| Root Directory | Repository root (`.`); leave the subdirectory field empty |
-| Install Command | `npm ci` |
-| Build Command | `npm run build` |
-| Output Directory | `.next` (Next.js default) |
-| Node.js | 24.x |
-| Required environment variable | `API_INTERNAL_URL=https://your-existing-api.example.com` |
+| `SUPABASE_URL` | Project API origin |
+| `MANGALENS_GATEWAY_SECRET` | Random bearer token shared with the private gateway |
+| `DEEPL_API_KEY` | DeepL API Free credential |
+| `OCR_SPACE_API_KEY` | OCR.space free credential |
 
-`vercel.json` records the build settings. Set `API_INTERNAL_URL` for Production and any Preview environments you use **before building**. It must be an HTTPS origin with no path, `/api` suffix, query or credentials. Do not point it at the frontend's own domain. The build rejects a missing or invalid value; changing it requires a rebuild. No `NEXT_PUBLIC_*` variables are needed.
+Apply `supabase/migrations/202610260001_browser_processing.sql` to an empty
+Supabase project. Deploy `supabase/functions/mangalens-gateway/index.ts` after
+substituting its hash marker with the SHA-256 of the gateway token; keep the
+actual token only in Vercel. Deploy with `verify_jwt=false`: this gateway verifies
+its own bearer token before every operation. Supabase's service-role credential
+remains inside the Edge Function runtime. Never use `NEXT_PUBLIC_*` for secrets.
+See [hosted setup, limits and verification](docs/VERCEL.md).
 
-On the **existing backend and worker**, retain all provider keys and budgets from the root `.env.example`, configure persistent `DATABASE_URL`, `DATA_DIR`, `MODEL_DIR`, `FONT_PATH`, and run migrations before starting the API and worker. Set `COOKIE_SECURE=true` and `ALLOWED_ORIGIN` to the exact public frontend origin. A comma-separated list can explicitly trust both production and selected previews; no wildcard is supported. Do not copy `DEEPL_API_KEY`, `OCR_SPACE_API_KEY` or database credentials into client variables or Vercel. See [deployment compatibility and verification](docs/VERCEL.md) for runtime, upload, timeout and storage constraints.
+For the existing Python deployment, set `API_INTERNAL_URL` to the backend HTTPS
+origin, with no path or credentials, and retain the separate API and worker.
+Local development defaults to the Python API on port 8000. To develop the hosted
+path locally, set `MANGALENS_CLOUD=1` and the four server variables in ignored
+`.env.local`.
 
-### Migrate existing deployments safely
+Hosted libraries are temporary browser sessions, separate from Python libraries.
+Clearing cookies loses access. Projects expire after seven days; expired files
+are removed when the library is accessed. Download results you want to keep.
 
-1. Keep the current backend, database, worker and old frontend online. Back up persistent data. No backend data migration is needed for this packaging change.
-2. Import the root into one new Vercel project, or update an existing frontend project's Root Directory to root. Remove old `--prefix frontend` commands and `frontend/.next` overrides. Set the values above and deploy a preview.
-3. Add the exact preview origin to the backend's `ALLOWED_ORIGIN`; verify `/api/health`, session creation, an upload, processing, original/translated images, editor save/retry and export. Check a large chapter against the real gateway limits too.
-4. Only after verification, move the production domain and update trusted origins. Keep the prior frontend available for rollback until the new deployment is confirmed. Session cookies are host-scoped: a new hostname starts a separate temporary library; using the same hostname and database preserves existing cookie-based access. Do not delete the backend or worker: they are still required.
-
-Nothing in this refactor changes hosted settings or deletes old projects automatically.
-
-## DeepL and optional cloud OCR
+## Python mode: DeepL and optional cloud OCR
 
 DeepL is the default provider in this workspace. Its API Free key is stored only in the ignored server `.env`; the app chooses `api-free.deepl.com` for keys ending in `:fx` and `api.deepl.com` for paid API keys. Never place a key in frontend code. `GET /api/usage` and Settings show near-real-time DeepL account characters and this session's request counters without exposing credentials. `DEEPL_MONTHLY_CHARACTER_BUDGET` defaults to 100,000 app-submitted characters; the account's own quota is also checked before a new request. DeepL receives recognized dialogue and nearby chapter context, not page images.
 
@@ -105,7 +116,7 @@ DeepL translation and OCR.space use separate credentials. Existing Argos models 
 
 On a fresh installation without a DeepL key, the app selects Argos after its model is installed. A DeepL key is not required to use the offline path. Without an OCR.space key, local OCR remains available.
 
-## Translation providers
+## Python mode: translation providers
 
 Choose a provider in the import dialog. All credentials remain server-side in `.env`:
 

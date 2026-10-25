@@ -100,11 +100,13 @@ export default function Settings() {
               onChange={(e) => pref.set({ fallback_provider: e.target.value })}
             >
               <option value="">None</option>
-              {["argos", "openai", "ollama", "google", "azure"].filter(
-                (provider) => health?.providers[provider],
-              ).map((provider) => (
-                <option key={provider} value={provider}>{provider}</option>
-              ))}
+              {["argos", "openai", "ollama", "google", "azure"]
+                .filter((provider) => health?.providers[provider])
+                .map((provider) => (
+                  <option key={provider} value={provider}>
+                    {provider}
+                  </option>
+                ))}
             </select>
           </label>
           <label className="field">
@@ -168,26 +170,81 @@ export default function Settings() {
           Installed OCR languages:{" "}
           {health?.ocr_languages.join(", ") || "None detected"}
           <br />
-          Cloud OCR: {health?.cloud_ocr_provider === "ocr_space" ? "OCR.space free endpoint" : "Google Cloud Vision"} · {health?.cloud_ocr_available ? "Configured" : "Not configured; local OCR active"}
+          Cloud OCR:{" "}
+          {health?.cloud_ocr_provider === "ocr_space"
+            ? "OCR.space free endpoint"
+            : "Google Cloud Vision"}{" "}
+          ·{" "}
+          {health?.cloud_ocr_available
+            ? "Configured"
+            : health?.execution_mode === "browser"
+              ? "Not configured"
+              : "Not configured; local OCR active"}
           <br />
           Typesetting font:{" "}
           {health?.font_available ? "Available" : "Unavailable"}
         </p>
-        {usage && <p className="hint">
-          DeepL this billing period: {usage.deepl.account?.character_count.toLocaleString() ?? "Unavailable"}
-          {usage.deepl.account && ` / ${usage.deepl.account.character_limit.toLocaleString()} characters`}
-          <br />
-          This browser session: {usage.deepl.requests} translation requests, {usage.deepl.characters_submitted.toLocaleString()} characters, {usage.deepl.failures} failures, {usage.deepl.rate_limits} rate limits.
-          <br />
-          Server monthly DeepL budget: {usage.deepl.local_characters_committed.toLocaleString()} / {usage.deepl.local_monthly_budget.toLocaleString()} characters committed, including pending requests and uncertain timeout outcomes. Provider-confirmed usage is shown above.
-          <br />
-          OCR.space on this server: {usage.ocr_space.requests_today}/{usage.ocr_space.daily_budget} daily requests, {usage.ocr_space.requests_month}/{usage.ocr_space.monthly_budget} monthly requests; Engine 3: {usage.ocr_space.engine_3_requests}/{usage.ocr_space.engine_3_monthly_budget}. {usage.ocr_space.rate_limits} rate limits. Each tile and retry counts.
-          <br />
-          Google Vision: {usage.cloud_ocr.requests} requests / {usage.cloud_ocr.local_monthly_budget} local monthly limit when explicitly selected on the server.
-          {Object.entries(usage.providers).filter(([name]) => name !== "deepl").map(([name, counts]) => (
-            <span key={name}><br />{name}: {counts.requests} requests, {counts.failures} failures.</span>
-          ))}
-        </p>}
+        {usage && health?.execution_mode === "browser" ? (
+          <p className="hint">
+            This browser session: {usage.deepl.requests} reserved translation
+            attempts, {usage.deepl.characters_submitted.toLocaleString()}{" "}
+            characters.
+            <br />
+            Shared monthly DeepL budget:{" "}
+            {usage.deepl.local_characters_committed.toLocaleString()} /{" "}
+            {usage.deepl.local_monthly_budget.toLocaleString()} characters
+            reserved.
+            <br />
+            Shared OCR.space budget: {usage.ocr_space.requests_today}/
+            {usage.ocr_space.daily_budget} daily attempts,{" "}
+            {usage.ocr_space.requests_month}/{usage.ocr_space.monthly_budget}{" "}
+            monthly attempts; Engine 3: {usage.ocr_space.engine_3_requests}/
+            {usage.ocr_space.engine_3_monthly_budget} this month. Each tile and
+            retry counts.
+          </p>
+        ) : (
+          usage && (
+            <p className="hint">
+              DeepL this billing period:{" "}
+              {usage.deepl.account?.character_count.toLocaleString() ??
+                "Unavailable"}
+              {usage.deepl.account &&
+                ` / ${usage.deepl.account.character_limit.toLocaleString()} characters`}
+              <br />
+              This browser session: {usage.deepl.requests} translation requests,{" "}
+              {usage.deepl.characters_submitted.toLocaleString()} characters,{" "}
+              {usage.deepl.failures} failures, {usage.deepl.rate_limits} rate
+              limits.
+              <br />
+              Server monthly DeepL budget:{" "}
+              {usage.deepl.local_characters_committed.toLocaleString()} /{" "}
+              {usage.deepl.local_monthly_budget.toLocaleString()} characters
+              committed, including pending requests and uncertain timeout
+              outcomes. Provider-confirmed usage is shown above.
+              <br />
+              OCR.space on this server: {usage.ocr_space.requests_today}/
+              {usage.ocr_space.daily_budget} daily requests,{" "}
+              {usage.ocr_space.requests_month}/{usage.ocr_space.monthly_budget}{" "}
+              monthly requests; Engine 3: {usage.ocr_space.engine_3_requests}/
+              {usage.ocr_space.engine_3_monthly_budget}.{" "}
+              {usage.ocr_space.rate_limits} rate limits. Each tile and retry
+              counts.
+              <br />
+              Google Vision: {usage.cloud_ocr.requests} requests /{" "}
+              {usage.cloud_ocr.local_monthly_budget} local monthly limit when
+              explicitly selected on the server.
+              {Object.entries(usage.providers)
+                .filter(([name]) => name !== "deepl")
+                .map(([name, counts]) => (
+                  <span key={name}>
+                    <br />
+                    {name}: {counts.requests} requests, {counts.failures}{" "}
+                    failures.
+                  </span>
+                ))}
+            </p>
+          )
+        )}
         <p className="hint">
           Installed offline translation pairs:{" "}
           {health?.offline_pairs?.length
@@ -197,12 +254,14 @@ export default function Settings() {
                     `${languages[pair.source] || pair.source} → ${languages[pair.target] || pair.target}`,
                 )
                 .join(", ")
-            : "None reported. Restart the backend after upgrading to refresh model discovery."}
+            : health?.execution_mode === "browser"
+              ? "Offline models are unavailable in this hosted version."
+              : "None reported. Restart the backend after upgrading to refresh model discovery."}
         </p>
         <div className="note">
-          Configuration indicates installed models or credentials; external
-          connectivity is checked during translation. Offline translation
-          requires a model for the selected language pair.
+          {health?.execution_mode === "browser"
+            ? "Keep a browser tab open during translation. Provider usage above counts reserved attempts, including failed or interrupted requests. Exact failure counts are not tracked in this hosted version. Source text and artwork need manual review."
+            : "Configuration indicates installed models or credentials; external connectivity is checked during translation. Offline translation requires a model for the selected language pair."}
         </div>
       </section>
       <section className="panel settings-panel">
@@ -221,7 +280,9 @@ export default function Settings() {
               try {
                 await api("/cache", { method: "DELETE" });
                 setMessage(
-                  "Your processing cache was cleared. Original projects are retained.",
+                  health?.execution_mode === "browser"
+                    ? "This hosted version has no separate processing cache. Your projects are retained."
+                    : "Your processing cache was cleared. Original projects are retained.",
                 );
               } catch (e) {
                 setMessage((e as Error).message);

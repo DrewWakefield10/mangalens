@@ -13,6 +13,7 @@ export type Page = {
   metrics: Record<string, unknown>;
 };
 export type Project = {
+  execution_mode?: "browser";
   id: string;
   title: string;
   created: number;
@@ -44,6 +45,9 @@ export type Region = {
   restored: boolean;
 };
 export type Health = {
+  execution_mode?: "browser";
+  storage_configured?: boolean;
+  max_pages?: number;
   status: string;
   providers: Record<string, boolean>;
   default_provider: string;
@@ -82,7 +86,7 @@ export async function api<T>(
   path: string,
   options: RequestInit = {},
 ): Promise<T> {
-  if (path !== "/session") {
+  if (path !== "/session" && path !== "/health") {
     session ||= api("/session", { method: "POST" }).catch((e) => {
       session = undefined;
       throw e;

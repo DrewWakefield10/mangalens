@@ -5,7 +5,7 @@ import { spawnSync } from 'node:child_process';
 function config(env) {
   return spawnSync(process.execPath, ['--input-type=module', '-e',
     'const {default:c}=await import("./next.config.ts"); console.log(JSON.stringify({rewrites:await c.rewrites(),headers:await c.headers(),output:c.output}));'],
-    { cwd: process.cwd(), env: { ...process.env, VERCEL: '', API_INTERNAL_URL: '', ...env }, encoding: 'utf8' });
+    { cwd: process.cwd(), env: { ...process.env, VERCEL: '', API_INTERNAL_URL: '', MANGALENS_CLOUD: '', ...env }, encoding: 'utf8' });
 }
 
 test('local API routing retains relative paths and standalone Docker output', () => {
@@ -27,11 +27,22 @@ test('Vercel routes directly to the configured origin without shared API caching
   assert.ok(headers.some(header => header.key === 'Cache-Control' && header.value.includes('no-store')));
 });
 
-test('Vercel rejects missing, insecure, credential-bearing and path-bearing origins', () => {
-  for (const origin of ['', 'http://api.example.com', 'https://user:secret@api.example.com', 'https://api.example.com/api', 'https://api.example.com?token=secret', 'ftp://api.example.com']) {
+test('Vercel rejects explicitly configured insecure, credential-bearing and path-bearing origins', () => {
+  for (const origin of ['http://api.example.com', 'https://user:secret@api.example.com', 'https://api.example.com/api', 'https://api.example.com?token=secret', 'ftp://api.example.com']) {
     const result = config({ VERCEL:'1', API_INTERNAL_URL:origin });
     assert.notEqual(result.status, 0);
     assert.match(result.stderr, /API_INTERNAL_URL/);
     assert.ok(!result.stderr.includes('user:secret'));
   }
+});
+
+test('Vercel without an external API uses native cloud routes', () => {
+  const result = config({VERCEL:'1'});
+  assert.equal(result.status,0,result.stderr);
+  assert.deepEqual(JSON.parse(result.stdout).rewrites,[]);
+});
+test('local cloud mode can exercise native routes without Python', () => {
+  const result = config({MANGALENS_CLOUD:'1'});
+  assert.equal(result.status,0,result.stderr);
+  assert.deepEqual(JSON.parse(result.stdout).rewrites,[]);
 });
