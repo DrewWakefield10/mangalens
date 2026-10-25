@@ -1,0 +1,3 @@
+Original geometric sample artwork and Japanese test page created for MangaLens. Dedicated to the public domain under CC0 1.0: https://creativecommons.org/publicdomain/zero/1.0/
+Japanese source: 今日はいい天気ですね。
+The homepage English text is human-authored, not generated inference.

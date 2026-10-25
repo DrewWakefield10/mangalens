@@ -1,0 +1,53 @@
+services:
+  db:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_DB: mangalens
+      POSTGRES_USER: mangalens
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Copy .env.example to .env and set POSTGRES_PASSWORD}
+    volumes: [postgres:/var/lib/postgresql/data]
+    healthcheck:
+      test: [CMD-SHELL, "pg_isready -U mangalens -d mangalens"]
+      interval: 5s
+      timeout: 5s
+      retries: 15
+  api:
+    build: {context: ., dockerfile: backend/Dockerfile}
+    env_file: .env
+    environment: &backend-env
+      DATABASE_URL: postgresql+psycopg://mangalens:${POSTGRES_PASSWORD}@db:5432/mangalens
+      DATA_DIR: /app/data
+      MODEL_DIR: /app/models
+      FONT_PATH: /app/assets/fonts/NotoSansCJKjp-Regular.otf
+    volumes: &backend-volumes
+      - data:/app/data
+      - ./models:/app/models:ro
+    depends_on:
+      db: {condition: service_healthy}
+    command: [sh, -c, "alembic upgrade head && uvicorn app.main:app --host 0.0.0.0 --port 8000"]
+    ports: ["127.0.0.1:8000:8000"]
+    healthcheck:
+      test: [CMD, python, -c, "import urllib.request; urllib.request.urlopen('http://localhost:8000/api/health')"]
+      interval: 15s
+      timeout: 10s
+      retries: 10
+    restart: unless-stopped
+  worker:
+    build: {context: ., dockerfile: backend/Dockerfile}
+    env_file: .env
+    environment: *backend-env
+    volumes: *backend-volumes
+    depends_on:
+      api: {condition: service_healthy}
+    command: [python, -m, app.worker]
+    mem_limit: 2g
+    restart: unless-stopped
+  web:
+    build: {context: ., dockerfile: frontend/Dockerfile}
+    ports: ["127.0.0.1:3000:3000"]
+    depends_on:
+      api: {condition: service_healthy}
+    restart: unless-stopped
+volumes:
+  postgres:
+  data:

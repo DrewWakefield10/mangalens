@@ -1,0 +1,5 @@
+# Optional manga crop recognizer. Torch >=2.6 uses restricted weights-only loading.
+-r requirements.txt
+torch>=2.6,<3
+manga-ocr==0.1.14
+transformers==4.57.6
