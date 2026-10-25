@@ -25,7 +25,7 @@ Requirements: Python 3.12, Node.js 24 LTS, and Tesseract 5. Windows requires the
 ```powershell
 python -m venv .venv
 .\.venv\Scripts\python.exe -m pip install -r backend/requirements.txt
-npm.cmd --prefix frontend ci
+npm.cmd ci
 Copy-Item .env.example .env
 .\.venv\Scripts\python.exe scripts/setup_models.py
 .\.venv\Scripts\python.exe scripts/make_samples.py
@@ -66,16 +66,34 @@ This starts PostgreSQL, runs Alembic migrations, then starts the API, worker and
 
 The Docker definition has been statically validated. The host's Docker daemon was stopped during delivery, so a container build and PostgreSQL runtime verification were not performed.
 
-## Deploy the frontend to Vercel
+## One repository import, one Vercel project
 
-Vercel can host the Next.js frontend, but not the complete MangaLens stack: the FastAPI API and durable worker depend on a persistent database, image storage, OCR/model files, and a long-running worker process. Deploy those services separately on a host that supports persistent storage and background workers, and use PostgreSQL for a hosted deployment.
+Import [DrewWakefield10/mangalens](https://github.com/DrewWakefield10/mangalens) **once**, using the repository root. Next.js now lives at the root; there is no separate frontend import. Browser requests remain relative `/api/...` and are rewritten directly to the existing persistent FastAPI host on the same public domain.
 
-1. Import this repository into Vercel and set **Root Directory** to `frontend`. Keep the framework preset as Next.js; Vercel detects the build and output settings automatically.
-2. Set `API_INTERNAL_URL` in the Vercel project's Production and Preview environment variables to the deployed API's HTTPS origin, for example `https://api.example.com` (no path or trailing API route). The Next.js rewrite proxies `/api/*` to that origin, keeping browser requests and session cookies same-origin. Vercel builds fail clearly when this setting is missing.
-3. Configure the API with `ALLOWED_ORIGIN` set to the exact deployed frontend origin and `COOKIE_SECURE=true`. Configure the database, durable `DATA_DIR`, models, font and provider credentials on the API host, then run the API and worker as separate services. Do not put backend credentials in Vercel's `NEXT_PUBLIC_*` variables.
-4. For Preview deployments, allow the exact preview origin in the API's `ALLOWED_ORIGIN` setting before testing session-based workflows.
+**This supports one Vercel project, with an external processing backend. It is not a self-contained Vercel deployment.** The API, durable worker, database, image storage and local OCR/translation models must continue running on a persistent host. DeepL and OCR.space do not replace storage, image cleaning, typesetting or the worker. No new service has been provisioned or provider added.
 
-This deploys only the frontend. Uploads, translation jobs, OCR and image storage still require the separately hosted backend and worker.
+| Vercel setting | Value |
+| --- | --- |
+| Framework Preset | Next.js |
+| Root Directory | Repository root (`.`); leave the subdirectory field empty |
+| Install Command | `npm ci` |
+| Build Command | `npm run build` |
+| Output Directory | `.next` (Next.js default) |
+| Node.js | 24.x |
+| Required environment variable | `API_INTERNAL_URL=https://your-existing-api.example.com` |
+
+`vercel.json` records the build settings. Set `API_INTERNAL_URL` for Production and any Preview environments you use **before building**. It must be an HTTPS origin with no path, `/api` suffix, query or credentials. Do not point it at the frontend's own domain. The build rejects a missing or invalid value; changing it requires a rebuild. No `NEXT_PUBLIC_*` variables are needed.
+
+On the **existing backend and worker**, retain all provider keys and budgets from the root `.env.example`, configure persistent `DATABASE_URL`, `DATA_DIR`, `MODEL_DIR`, `FONT_PATH`, and run migrations before starting the API and worker. Set `COOKIE_SECURE=true` and `ALLOWED_ORIGIN` to the exact public frontend origin. A comma-separated list can explicitly trust both production and selected previews; no wildcard is supported. Do not copy `DEEPL_API_KEY`, `OCR_SPACE_API_KEY` or database credentials into client variables or Vercel. See [deployment compatibility and verification](docs/VERCEL.md) for runtime, upload, timeout and storage constraints.
+
+### Migrate existing deployments safely
+
+1. Keep the current backend, database, worker and old frontend online. Back up persistent data. No backend data migration is needed for this packaging change.
+2. Import the root into one new Vercel project, or update an existing frontend project's Root Directory to root. Remove old `--prefix frontend` commands and `frontend/.next` overrides. Set the values above and deploy a preview.
+3. Add the exact preview origin to the backend's `ALLOWED_ORIGIN`; verify `/api/health`, session creation, an upload, processing, original/translated images, editor save/retry and export. Check a large chapter against the real gateway limits too.
+4. Only after verification, move the production domain and update trusted origins. Keep the prior frontend available for rollback until the new deployment is confirmed. Session cookies are host-scoped: a new hostname starts a separate temporary library; using the same hostname and database preserves existing cookie-based access. Do not delete the backend or worker: they are still required.
+
+Nothing in this refactor changes hosted settings or deletes old projects automatically.
 
 ## DeepL and optional cloud OCR
 
@@ -118,20 +136,23 @@ This is local-first software, not a hardened multi-tenant hosted service. Review
 
 ```powershell
 .\.venv\Scripts\python.exe -m pytest backend/tests -q
-npm.cmd --prefix frontend run build
+npm.cmd run typecheck
+npm.cmd run test:deployment
+npm.cmd run build
 # With scripts/dev.py running:
-npm.cmd --prefix frontend test
+npm.cmd test
 .\.venv\Scripts\python.exe scripts/demo.py
 ```
 
-Playwright uses installed Microsoft Edge by default. On Linux, install Chromium with `npx playwright install chromium` inside `frontend`, and set `PLAYWRIGHT_CHANNEL=chromium`.
+Playwright uses installed Microsoft Edge by default. On Linux, install Chromium with `npx playwright install chromium` from the repository root, and set `PLAYWRIGHT_CHANNEL=chromium`.
 
 The real-model test is skipped only if model files are missing. Other tests explicitly mock failures or providers; mocked outputs are not presented as real inference. `scripts/demo.py` uses HTTP and the actual worker, then saves original/translated/clean/mask images and OCR/translation/timing metadata under `data/demo/`. It uses its own private session, so its project is not automatically visible in a different browser's library.
 
 ## Repository map
 
 ```text
-frontend/             Next.js routes, reader, editor, responsive UI and browser tests
+app/, components/, lib/  Next.js routes, reader/editor and shared frontend code
+public/, tests/         Browser assets and browser/deployment regression tests
 backend/app/          API, database, imports, providers, OCR, renderer and durable worker
 backend/migrations/   Alembic schema migration
 backend/tests/        Security, pipeline and real CPU integration tests

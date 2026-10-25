@@ -1,0 +1,15 @@
+.env
+.env.*
+!.env.example
+.venv
+backend
+data
+models
+assets
+samples
+frontend
+tests
+test-results
+playwright-report
+.pytest_cache
+**/__pycache__

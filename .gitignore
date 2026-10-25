@@ -6,6 +6,9 @@ __pycache__/
 .pytest_cache/
 *.pyc
 .env
+.env.*
+!.env.example
+.vercel/
 data/
 models/
 samples/sora-wo-matotte-chapter-34/

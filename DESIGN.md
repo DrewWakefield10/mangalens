@@ -28,7 +28,7 @@ components:
 
 ## Overview
 
-Preserve the existing translation workbench: the manga page is the main visual reference. English UI supports multilingual page content; this does not establish a Japan-market product brief. This file mirrors the canonical runtime tokens in `frontend/app/globals.css`; it does not generate them. Existing user workflows and controls take precedence over a visual redesign.
+Preserve the existing translation workbench: the manga page is the main visual reference. English UI supports multilingual page content; this does not establish a Japan-market product brief. This file mirrors the canonical runtime tokens in `app/globals.css`; it does not generate them. Existing user workflows and controls take precedence over a visual redesign.
 
 ## Colors
 
@@ -52,7 +52,7 @@ Panels use the existing 14px radius; controls use 8px. The manga page itself rem
 
 ## Components
 
-Canonical actions use `frontend/components/ui/button.tsx`. Native labeled checkboxes use `.check-field`, including the session-local Show region boxes setting. Current stage results and chronological history share the existing `.region-diagnostics` disclosure. Settings reports server commitments separately from provider-confirmed usage.
+Canonical actions use `components/ui/button.tsx`. Native labeled checkboxes use `.check-field`, including the session-local Show region boxes setting. Current stage results and chronological history share the existing `.region-diagnostics` disclosure. Settings reports server commitments separately from provider-confirmed usage.
 
 ## Do's and Don'ts
 

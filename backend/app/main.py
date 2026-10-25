@@ -83,10 +83,10 @@ async def protect(request: Request, call_next):
         if request.headers.get("x-mangalens-client") != "web":
             return Response("Missing X-MangaLens-Client header", 403)
         origin = request.headers.get("origin")
-        if origin and origin.rstrip("/") not in {
-            settings.allowed_origin.rstrip("/"),
-            "http://127.0.0.1:3000",
-        }:
+        trusted_origins = {value.strip().rstrip("/")
+                           for value in settings.allowed_origin.split(",") if value.strip()}
+        trusted_origins.add("http://127.0.0.1:3000")
+        if origin and origin.rstrip("/") not in trusted_origins:
             return Response("Origin not allowed", 403)
         try:
             content_length = int(request.headers.get("content-length", "0"))

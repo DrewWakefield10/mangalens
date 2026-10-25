@@ -17,7 +17,7 @@ test("offline import blocks a missing language pair before processing", async ({
   await page.goto("/translate");
   await page
     .locator("input[type=file]")
-    .setInputFiles(path.resolve("../samples/japanese-page.png"));
+    .setInputFiles(path.resolve("samples/japanese-page.png"));
   await page
     .getByRole("checkbox", {
       name: "I have permission to upload and translate this content.",
@@ -70,11 +70,11 @@ test("homepage is responsive and comparison works", async ({ page }) => {
     .getByRole("slider", { name: "Compare original and translated sample" })
     .fill("25");
   await page.screenshot({
-    path: "../data/qa/home-desktop.png",
+    path: "data/qa/home-desktop.png",
     fullPage: true,
   });
   await page.setViewportSize({ width: 390, height: 844 });
-  await page.screenshot({ path: "../data/qa/home-mobile.png", fullPage: true });
+  await page.screenshot({ path: "data/qa/home-mobile.png", fullPage: true });
   expect(
     await page.evaluate(
       () => document.documentElement.scrollWidth <= window.innerWidth,
@@ -94,7 +94,7 @@ test("real Japanese upload, worker, reader, editor and export", async ({
   await page.getByLabel("Chapter title").fill("Browser verification chapter");
   await page
     .locator("input[type=file]")
-    .setInputFiles(path.resolve("../samples/japanese-page.png"));
+    .setInputFiles(path.resolve("samples/japanese-page.png"));
   await expect(
     page.getByRole("button", { name: "Preview chapter" }),
   ).toBeDisabled();
@@ -130,7 +130,7 @@ test("real Japanese upload, worker, reader, editor and export", async ({
   ).toBeVisible();
   await page.getByLabel("Reading mode").selectOption("double");
   await page.getByLabel("Reading mode").selectOption("scroll");
-  await page.screenshot({ path: "../data/qa/reader.png", fullPage: true });
+  await page.screenshot({ path: "data/qa/reader.png", fullPage: true });
   await page.goto("/editor/" + id);
   await expect(
     page.getByRole("textbox", { name: "Translation", exact: true }),
@@ -142,7 +142,7 @@ test("real Japanese upload, worker, reader, editor and export", async ({
   await page.getByRole("button", { name: "Redo edit" }).click();
   await page.getByRole("button", { name: "Save changes" }).click();
   await expect(page.getByRole("status")).toContainText("Saved.");
-  await page.screenshot({ path: "../data/qa/editor.png", fullPage: true });
+  await page.screenshot({ path: "data/qa/editor.png", fullPage: true });
   await expect
     .poll(
       async () => {
@@ -166,7 +166,7 @@ test("manual region drawing, OCR, correction and clean preview", async ({
   await page.goto("/translate");
   await page
     .locator("input[type=file]")
-    .setInputFiles(path.resolve("../samples/japanese-page.png"));
+    .setInputFiles(path.resolve("samples/japanese-page.png"));
   await page
     .getByRole("checkbox", {
       name: "I have permission to upload and translate this content.",
@@ -236,7 +236,7 @@ test("manual region drawing, OCR, correction and clean preview", async ({
     await page.getByRole("checkbox", { name: "Show region boxes" }).check();
     await expect(page.locator(".region-box").first()).toBeVisible();
     await page.screenshot({
-      path: "../data/qa/pipeline/manual-editor.png",
+      path: "data/qa/pipeline/manual-editor.png",
       fullPage: true,
     });
     await page.getByRole("button", { name: "mask", exact: true }).click();

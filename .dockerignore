@@ -1,10 +1,11 @@
 .venv
-frontend/node_modules
-frontend/.next
+node_modules
+.next
+frontend
 .git
 .env
 data
 models
 **/__pycache__
 test-results
-frontend/test-results
+.vercel

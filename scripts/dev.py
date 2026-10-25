@@ -14,6 +14,8 @@ ROOT = Path(__file__).resolve().parents[1]
 
 def main():
     parser = argparse.ArgumentParser()
+    parser.add_argument("--production", action="store_true",
+                        help="Serve the existing root Next.js production build (run npm run build first).")
     parser.add_argument(
         "--smoke-seconds",
         type=int,
@@ -57,7 +59,7 @@ def main():
             ROOT / "backend",
         ),
         ([sys.executable, "-m", "app.worker"], ROOT / "backend"),
-        ([npm, "run", "dev"], ROOT / "frontend"),
+        ([npm, "run", "start" if args.production else "dev"], ROOT),
     ]
     processes = []
     try:

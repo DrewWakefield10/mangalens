@@ -6,7 +6,7 @@
 - Argos Translate: MIT/CC0 project; CTranslate2: MIT; SentencePiece: Apache 2.0. This application directly invokes CTranslate2 using the package's SentencePiece tokenizer or Moses/BPE via `sacremoses` and `subword-nmt`, which retain their upstream licenses. Format reference: https://github.com/argosopentech/argos-translate/blob/master/argostranslate/tokenizer.py.
 - Pillow: HPND; OpenCV: Apache 2.0; PDFium via pypdfium2: upstream PDFium/BSD-style and wrapper licenses. Installed distributions retain their licenses.
 - Next.js, React, Tailwind, Zustand, TanStack Query, Radix UI and Lucide retain their upstream licenses. Dependency lockfiles record frontend package versions.
-- `frontend/public/demo-*.svg` and `samples/japanese-page.png`: original geometric artwork created for this project, CC0 1.0. The Japanese sentence is a simple original test fixture. Homepage English lettering is an authored demonstration, not model output.
+- `public/demo-*.svg` and `samples/japanese-page.png`: original geometric artwork created for this project, CC0 1.0. The Japanese sentence is a simple original test fixture. Homepage English lettering is an authored demonstration, not model output.
 
 No copyrighted manga pages from publishers or unauthorized hosting services are bundled.
 
