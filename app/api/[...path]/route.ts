@@ -1,3 +1,4 @@
+import { prepareRegions, type LayoutGroup } from "@/lib/page-layout";
 import { randomUUID } from "node:crypto";
 import { NextRequest, NextResponse } from "next/server";
 import type { Region } from "@/lib/api";
@@ -513,12 +514,22 @@ async function handler(req: NextRequest, ctx: Context) {
           await mutate<CloudPage>(page.id, who, (p) => ({
             ...p,
             regions: [...p.regions, region],
+            metrics: { ...p.metrics, layout_version: 0 },
             status: "needs_review",
           }));
           return json(region, 201);
         }
       }
-      if (["retry", "ocr"].includes(parts[2]) && method === "POST") {
+      if (["retry", "ocr", "rebuild"].includes(parts[2]) && method === "POST") {
+        const options = parts[2] === "ocr" ? await body(req) : {};
+        const recoverySource = options.source_lang || project.data.source_lang;
+        if (
+          parts[2] === "ocr" &&
+          !["auto", "ja", "en", "ko", "zh-CN", "zh-TW", "ru"].includes(
+            recoverySource,
+          )
+        )
+          fail(400, "Choose a supported OCR language.");
         await mutate<CloudProject>(project.id, who, (p) => ({
           ...p,
           cancelled: false,
@@ -529,7 +540,25 @@ async function handler(req: NextRequest, ctx: Context) {
               409,
               "Wait for this page to finish or pause the chapter first.",
             );
-          // Retry only missing stages, preserving saved corrections and translations.
+          if (parts[2] === "ocr") {
+            p.metrics.ocr_language = recoverySource;
+            p.regions = p.regions.filter(
+              (r) =>
+                r.kind === "manual" ||
+                r.restored ||
+                r.render.user_edited ||
+                r.render.source_verified,
+            );
+            p.tiles_done = [];
+            p.tile_count = 0;
+            p.translated = false;
+            p.metrics.layout_version = 0;
+          }
+          if (parts[2] === "rebuild") {
+            p.metrics.layout_version = 0;
+            p.translated = false;
+          }
+          // Resume retains checkpoints; an explicit OCR retry preserves manual corrections.
           p.status = "queued";
           p.error = "";
           p.lease = undefined;
@@ -539,9 +568,14 @@ async function handler(req: NextRequest, ctx: Context) {
       }
       const input = method === "POST" ? await body(req) : {};
       if (
-        ["recognize", "translate", "output-urls", "commit", "failed"].includes(
-          parts[2],
-        )
+        [
+          "recognize",
+          "prepare",
+          "translate",
+          "output-urls",
+          "commit",
+          "failed",
+        ].includes(parts[2])
       ) {
         lease(page, input.token);
         if (project.data.cancelled) fail(409, "This chapter was paused.");
@@ -582,8 +616,13 @@ async function handler(req: NextRequest, ctx: Context) {
                 if (
                   !p.regions.some(
                     (old) =>
-                      overlap(old.box, r.box) > 0.6 &&
-                      old.source_text === r.source_text,
+                      overlap(
+                        (old.render.source_box as number[]) || old.box,
+                        r.box,
+                      ) > 0.6 &&
+                      (old.source_text === r.source_text ||
+                        old.render.user_edited === true ||
+                        old.kind === "manual"),
                   )
                 )
                   p.regions.push(r);
@@ -601,15 +640,107 @@ async function handler(req: NextRequest, ctx: Context) {
           });
           return json({ ok: true });
         }
+        if (parts[2] === "prepare" && method === "POST") {
+          if (
+            !Array.isArray(input.groups) ||
+            input.groups.length > L.maxRegions
+          )
+            fail(400, "Invalid text grouping.");
+          const seen = new Set<string>();
+          const groups: LayoutGroup[] = input.groups.map((g: LayoutGroup) => {
+            if (
+              !g ||
+              !Array.isArray(g.ids) ||
+              !g.ids.length ||
+              new Set(g.ids).size !== g.ids.length ||
+              g.ids.some(
+                (id) =>
+                  typeof id !== "string" ||
+                  seen.has(id) ||
+                  !page.regions.some((r) => r.id === id),
+              )
+            )
+              fail(400, "Each text region must be grouped once.");
+            g.ids.forEach((id) => seen.add(id));
+            const members = g.ids.map((id) =>
+              page.regions.find((r) => r.id === id)!,
+            );
+            if (
+              members.some(
+                (r) =>
+                  r.kind === "manual" ||
+                  r.restored ||
+                  r.render.user_edited ||
+                  r.render.source_verified,
+              ) &&
+              g.ids.length !== 1
+            )
+              fail(400, "Saved corrections cannot be merged.");
+            return {
+              ids: g.ids,
+              box: box(g.box, page),
+              ...(g.bubble
+                ? {
+                    bubble: box(g.bubble, page),
+                    cleanup: g.cleanup
+                      ? box(g.cleanup, page)
+                      : box(g.bubble, page),
+                  }
+                : {}),
+            };
+          });
+          if (seen.size !== page.regions.length)
+            fail(400, "Text grouping omitted a region.");
+          // Older saved pages retain the provider's paragraph order when rebuilt.
+          const source = page.regions.map((r, i) => ({
+            ...r,
+            render: {
+              ...r.render,
+              ...(r.render.ocr_order === undefined
+                ? { ocr_order: i, ocr_paragraph: "legacy" }
+                : {}),
+            },
+          }));
+          const prepared = prepareRegions(source, groups);
+          await mutate<CloudPage>(
+            page.id,
+            who,
+            (p) => {
+              lease(p, input.token);
+              p.regions = prepared;
+              p.translated = false;
+              p.metrics.layout_version = 2;
+              p.lease!.until = Date.now() + L.leaseMs;
+              return p;
+            },
+            pageDoc.version,
+          );
+          return json({ regions: prepared });
+        }
         if (parts[2] === "translate" && method === "POST") {
           if (
             !page.translated &&
-            (!page.tile_count || page.tiles_done.length !== page.tile_count)
+            (!page.tile_count || page.tiles_done.length !== page.tile_count) &&
+            !(
+              page.regions.length > 0 &&
+              page.regions.every(
+                (r) =>
+                  r.kind === "manual" ||
+                  r.restored ||
+                  r.render.user_edited ||
+                  r.render.source_verified,
+              )
+            )
           )
             fail(409, "Finish text recognition before translating.");
           const translated = page.translated
             ? page.regions
-            : await translate(page.regions, who, project.data);
+            : await translate(page.regions, who, {
+                ...project.data,
+                source_lang: String(
+                  page.metrics.ocr_language || project.data.source_lang,
+                ),
+              });
           await mutate<CloudPage>(page.id, who, (p) => {
             lease(p, input.token);
             p.regions = translated;
@@ -653,8 +784,58 @@ async function handler(req: NextRequest, ctx: Context) {
           const warnings = Array.isArray(input.warnings)
             ? input.warnings.map((s: unknown) => text(s, 300)).slice(0, 200)
             : [];
+          const diagnosticInput = Array.isArray(input.diagnostics)
+            ? input.diagnostics
+            : [];
+          const diagnostics = new Map<
+            string,
+            {
+              status: string;
+              reason: string;
+              mask_pixels: number;
+              font_size: number;
+            }
+          >();
+          for (const value of diagnosticInput) {
+            if (
+              !value ||
+              !page.regions.some((r) => r.id === value.id) ||
+              diagnostics.has(value.id)
+            )
+              fail(400, "Invalid rendering diagnostics.");
+            if (
+              !["PRESERVED", "RESTORED", "RENDERED_NEEDS_REVIEW"].includes(
+                value.status,
+              )
+            )
+              fail(400, "Invalid rendering result.");
+            diagnostics.set(value.id, {
+              status: value.status,
+              reason: text(value.reason, 300),
+              mask_pixels: integer(
+                value.mask_pixels,
+                0,
+                page.width * page.height,
+              ),
+              font_size: Number(value.font_size) || 0,
+            });
+          }
           await mutate<CloudPage>(page.id, who, (p) => {
             lease(p, input.token);
+            for (const r of p.regions) {
+              const diagnostic = diagnostics.get(r.id);
+              if (!diagnostic) continue;
+              r.render = {
+                ...r.render,
+                diagnostic_status: diagnostic.status,
+                mask_status: diagnostic.mask_pixels ? "APPLIED" : "PRESERVED",
+                mask_applied_pixels: diagnostic.mask_pixels,
+                actual_font_size: diagnostic.font_size,
+                failure_reason: diagnostic.reason,
+                mask_failure_reason:
+                  diagnostic.status === "PRESERVED" ? diagnostic.reason : "",
+              };
+            }
             const old = ["translated", "clean", "mask"].flatMap((k) =>
               p.assets[k] ? [p.assets[k]] : [],
             );
@@ -674,6 +855,12 @@ async function handler(req: NextRequest, ctx: Context) {
               unresolved_regions: p.regions.length,
               completed_regions: 0,
               processing_mode: "browser",
+              rendered_regions: [...diagnostics.values()].filter(
+                (d) => d.status === "RENDERED_NEEDS_REVIEW",
+              ).length,
+              preserved_regions: [...diagnostics.values()].filter(
+                (d) => d.status === "PRESERVED",
+              ).length,
             };
             return p;
           });
@@ -743,6 +930,8 @@ async function handler(req: NextRequest, ctx: Context) {
                 : [];
             r.render = {
               ...r.render,
+              user_edited: true,
+              mask_dilation: integer(input.mask_dilation ?? 1, 0, 4),
               font_size: integer(input.font_size, 12, 200),
               align: ["left", "center", "right"].includes(input.align)
                 ? input.align

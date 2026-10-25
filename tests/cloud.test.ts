@@ -215,3 +215,107 @@ test("document ownership, optimistic conflicts, signed origin and PNG verificati
     delete process.env.MANGALENS_GATEWAY_SECRET;
   }
 });
+
+import {
+  layoutGroups,
+  prepareRegions,
+  bubbleInk,
+  speechMap,
+} from "../lib/page-layout";
+import type { Region } from "../lib/api";
+function rasterFixture() {
+  const width = 600,
+    height = 400,
+    data = new Uint8ClampedArray(width * height * 4).fill(255);
+  const paint = (x: number, y: number, w: number, h: number, value = 0) => {
+    for (let yy = y; yy < y + h; yy++)
+      for (let xx = x; xx < x + w; xx++) {
+        const p = (yy * width + xx) * 4;
+        data[p] = data[p + 1] = data[p + 2] = value;
+      }
+  };
+  for (const x of [20, 220]) {
+    paint(x, 20, 160, 3);
+    paint(x, 217, 160, 3);
+    paint(x, 20, 3, 200);
+    paint(x + 157, 20, 3, 200);
+  }
+  for (const x of [65, 115])
+    for (let y = 60; y < 140; y += 25) paint(x, y, 12, 16);
+  paint(250, 60, 14, 16);
+  const region = (id: string, x: number, text: string): Region => ({
+    id,
+    page_id: "page",
+    box: [x, 58, 14, 90],
+    source_text: text,
+    translation: "",
+    language: "ja",
+    confidence: 0,
+    orientation: "vertical",
+    kind: "cloud_text",
+    render: { words: [[x, 58, 14, 90]], source_box: [x, 58, 14, 90] },
+    warnings: [],
+    restored: false,
+  });
+  return { image: { width, height, data }, region, paint };
+}
+test("vertical dialogue joins right-to-left within its balloon and expands placement", () => {
+  const { image, region } = rasterFixture();
+  const regions = [region("left", 65, "です"), region("right", 115, "今日")];
+  const prepared = prepareRegions(regions, layoutGroups(image, regions));
+  assert.equal(prepared.length, 1);
+  assert.equal(prepared[0].source_text, "今日です");
+  assert.equal(prepared[0].orientation, "vertical");
+  assert.ok(prepared[0].box[2] > 100);
+  assert.equal((prepared[0].render.source_members as unknown[]).length, 2);
+});
+test("separate balloons and manual corrections are never merged", () => {
+  const { image, region } = rasterFixture();
+  const a = region("a", 65, "今日"),
+    b = region("b", 250, "明日");
+  assert.equal(layoutGroups(image, [a, b]).length, 2);
+  const edited = {
+    ...region("edit", 115, "直しました"),
+    translation: "My correction",
+    render: { ...a.render, user_edited: true },
+  };
+  const prepared = prepareRegions(
+    [a, edited],
+    layoutGroups(image, [a, edited]),
+  );
+  assert.equal(prepared.length, 2);
+  assert.equal(
+    prepared.find((r) => r.id === "edit")!.translation,
+    "My correction",
+  );
+  assert.deepEqual(prepared.find((r) => r.id === "edit")!.box, edited.box);
+});
+test("cleanup finds lettering beyond approximate OCR boxes while preserving outlines", () => {
+  const { image, region } = rasterFixture();
+  const groups = layoutGroups(image, [region("a", 65, "今日")]);
+  const ink = bubbleInk(image, speechMap(image), groups[0].bubble!);
+  assert.ok(ink.includes(65 + 60 * image.width));
+  assert.ok(
+    ink.includes(115 + 110 * image.width),
+    "unboxed lettering inside the same balloon is included",
+  );
+  assert.ok(
+    !ink.includes(20 + 100 * image.width),
+    "balloon outline must remain",
+  );
+  assert.ok(
+    !ink.includes(250 + 60 * image.width),
+    "another balloon must remain",
+  );
+});
+test("provider paragraph order is retained when approximate vertical boxes disagree", () => {
+  const { image, region } = rasterFixture();
+  const a = region("a", 65, "先に"),
+    b = region("b", 115, "次に");
+  a.render = { ...a.render, ocr_paragraph: "0:1", ocr_order: 1 };
+  b.render = { ...b.render, ocr_paragraph: "0:1", ocr_order: 2 };
+  assert.equal(
+    prepareRegions([a, b], layoutGroups(image, [a, b]))[0].source_text,
+    "先に次に",
+  );
+});

@@ -85,6 +85,34 @@ export default function BrowserProcessor() {
                   });
                 }
               }
+              if (Number(page.metrics.layout_version || 0) < 2) {
+                setMessage(
+                  "Arranging dialogue on " +
+                    page.name +
+                    ". Keep this tab open.",
+                );
+                const { layoutGroups } = await import("@/lib/page-layout");
+                const { canvasOf } = await import("@/lib/browser-pages");
+                const latest = await api<Region[]>(
+                  "/pages/" + page.id + "/regions",
+                  { signal: controller.signal },
+                );
+                const surface = canvasOf(bitmap.width, bitmap.height);
+                const context = surface.getContext("2d", {
+                  willReadFrequently: true,
+                })!;
+                context.drawImage(bitmap, 0, 0);
+                const groups = layoutGroups(
+                  context.getImageData(0, 0, bitmap.width, bitmap.height),
+                  latest,
+                );
+                surface.width = surface.height = 0;
+                await api("/pages/" + page.id + "/prepare", {
+                  method: "POST",
+                  body: JSON.stringify({ token, groups }),
+                  signal: controller.signal,
+                });
+              }
               setMessage("Translating " + page.name + "… Keep this tab open.");
               const { regions } = await api<{ regions: Region[] }>(
                 "/pages/" + page.id + "/translate",
@@ -115,7 +143,11 @@ export default function BrowserProcessor() {
               }
               await api("/pages/" + page.id + "/commit", {
                 method: "POST",
-                body: JSON.stringify({ token, warnings: result.warnings }),
+                body: JSON.stringify({
+                  token,
+                  warnings: result.warnings,
+                  diagnostics: result.diagnostics,
+                }),
                 signal: controller.signal,
               });
               setError("");

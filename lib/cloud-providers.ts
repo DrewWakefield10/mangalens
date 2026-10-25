@@ -14,6 +14,7 @@ type OCRPayload = {
   IsErroredOnProcessing?: boolean;
   ParsedResults?: {
     FileParseExitCode: number;
+    ParsedText?: string;
     TextOverlay?: { Lines?: { LineText?: string; Words?: OCRWord[] }[] };
   }[];
 };
@@ -48,7 +49,11 @@ export function parseOcr(
       "OCR.space could not recognize this image. Retry later or add text manually in the editor.",
     );
   const regions: Region[] = [];
-  for (const result of payload.ParsedResults || []) {
+  let lineOrder = 0;
+  for (const [resultIndex, result] of (payload.ParsedResults || []).entries()) {
+    const paragraphs = (result.ParsedText || "")
+      .split(/\r?\n\s*\r?\n/)
+      .filter(Boolean);
     if (Number(result.FileParseExitCode) !== 1) continue;
     for (const line of result.TextOverlay?.Lines || []) {
       const words = (line.Words || []).flatMap((w) => {
@@ -81,10 +86,22 @@ export function parseOcr(
         translation: "",
         language: source,
         confidence: 0,
-        orientation: "horizontal",
+        orientation:
+          /[\u3000-\u9fff]/u.test(text) && bottom - y > (right - x) * 1.45
+            ? "vertical"
+            : "horizontal",
         kind: "cloud_text",
         render: {
           words,
+          ocr_order: lineOrder++,
+          ...(paragraphs.some((p) => p.includes(text))
+            ? {
+                ocr_paragraph:
+                  resultIndex +
+                  ":" +
+                  paragraphs.findIndex((p) => p.includes(text)),
+              }
+            : {}),
           source_box: [x, y, right - x, bottom - y],
           source_verified: false,
           diagnostic_status: "NEEDS_REVIEW",
@@ -105,7 +122,7 @@ export async function recognize(
   project: CloudProject,
 ) {
   if (!process.env.OCR_SPACE_API_KEY) fail(503, "OCR.space is not configured.");
-  const source = project.source_lang;
+  const source = String(page.metrics.ocr_language || project.source_lang);
   const engine = ["zh-CN", "zh-TW", "en", "ru"].includes(source) ? 2 : 3;
   await gateway({
     op: "rpc",
@@ -165,10 +182,10 @@ export async function translate(
   project: CloudProject,
 ) {
   if (!process.env.DEEPL_API_KEY) fail(503, "DeepL is not configured.");
-  const pending = regions.filter(
+  const result = structuredClone(regions);
+  const pending = result.filter(
     (r) => !r.translation && r.source_text.trim() && !r.restored,
   );
-  const result = structuredClone(regions);
   // Exact glossary matches are deterministic and do not consume provider quota.
   for (const r of pending) {
     const term = project.glossary.find((g) => g.source === r.source_text);
