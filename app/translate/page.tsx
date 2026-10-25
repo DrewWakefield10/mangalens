@@ -35,16 +35,26 @@ export default function Translate() {
   const [provider, setProvider] = useState("deepl");
   const [direction, setDirection] = useState("rtl");
   const [previews, setPreviews] = useState<string[]>([]);
-  const { data: health } = useQuery({
+  const {
+    data: health,
+    error: healthError,
+    refetch: reloadServices,
+  } = useQuery({
     queryKey: ["health"],
     queryFn: () => api<Health>("/health"),
     refetchInterval: 10000,
     refetchOnWindowFocus: true,
   });
   useEffect(() => {
-    if (health && !health.providers[provider]) setProvider(health.default_provider);
+    if (health && !health.providers[provider])
+      setProvider(health.default_provider);
   }, [health, provider]);
-  useEffect(() => { if (health?.execution_mode === "browser") { setQuality("quality"); setStyle("natural"); } }, [health?.execution_mode]);
+  useEffect(() => {
+    if (health?.execution_mode === "browser") {
+      setQuality("quality");
+      setStyle("natural");
+    }
+  }, [health?.execution_mode]);
   const offlineUnavailable = (language: string) =>
     provider === "argos" &&
     source !== "auto" &&
@@ -80,6 +90,10 @@ export default function Translate() {
     setError("");
     setBusy(true);
     try {
+      if (!health)
+        throw new Error(
+          "Wait for processing services to connect before importing pages.",
+        );
       let result: Project;
       if (health?.execution_mode === "browser") {
         const { importCloud } = await import("@/lib/browser-pages");
@@ -213,26 +227,30 @@ export default function Translate() {
               ))}
             </div>
           )}
-          {health?.execution_mode !== "browser" && <>
-          <div className="divider-label">OR IMPORT AN AUTHORIZED SOURCE</div>
-          <label className="input-icon">
-            <Link2 size={18} />
-            <input
-              aria-label="Supported chapter URL"
-              value={url}
-              onChange={(e) => {
-                setUrl(e.target.value);
-                setFiles([]);
-              }}
-              placeholder="https://your-source.com/chapter.json"
-            />
-          </label>
-          <p className="hint">
-            {health?.source_hosts.length
-              ? "Enabled hosts: " + health.source_hosts.join(", ")
-              : "No remote sources are enabled. Upload your files, or configure an authorized JSON manifest host on the server."}
-          </p>
-          </>}
+          {health && health.execution_mode !== "browser" && (
+            <>
+              <div className="divider-label">
+                OR IMPORT AN AUTHORIZED SOURCE
+              </div>
+              <label className="input-icon">
+                <Link2 size={18} />
+                <input
+                  aria-label="Supported chapter URL"
+                  value={url}
+                  onChange={(e) => {
+                    setUrl(e.target.value);
+                    setFiles([]);
+                  }}
+                  placeholder="https://your-source.com/chapter.json"
+                />
+              </label>
+              <p className="hint">
+                {health?.source_hosts.length
+                  ? "Enabled hosts: " + health.source_hosts.join(", ")
+                  : "No remote sources are enabled. Upload your files, or configure an authorized JSON manifest host on the server."}
+              </p>
+            </>
+          )}
           <label className="check-field">
             <input
               type="checkbox"
@@ -247,15 +265,54 @@ export default function Translate() {
             </div>
           )}
           <Button
-            disabled={busy || !authorized || (health?.execution_mode === "browser" ? !files.length || !health.storage_configured : !files.length && !url)}
+            disabled={
+              !health ||
+              busy ||
+              !authorized ||
+              (health?.execution_mode === "browser"
+                ? !files.length || !health.storage_configured
+                : !files.length && !url)
+            }
             onClick={importPages}
           >
-            {busy ? "Importing pages…" : "Preview chapter"}
+            {busy
+              ? "Importing pages…"
+              : !health
+                ? "Connecting services…"
+                : "Preview chapter"}
             <ArrowRight size={17} />
           </Button>
-          {busy && <p role="status" className="hint">{importStatus || "Importing your pages…"}</p>}
-          {health?.execution_mode === "browser" && <p className="hint">Up to 20 pages · 12 megapixels per page · 8 MB per page after PNG conversion. Keep this tab open while translating.</p>}
-          {health?.execution_mode === "browser" && !health.storage_configured && <p role="alert" className="error">Cloud storage setup is pending. Imports will become available when Supabase is configured.</p>}
+          {busy && (
+            <p role="status" className="hint">
+              {importStatus || "Importing your pages…"}
+            </p>
+          )}
+          {healthError && (
+            <div role="alert" className="error">
+              Processing services could not connect.{" "}
+              <Button
+                variant="outline"
+                onClick={() => {
+                  void reloadServices();
+                }}
+              >
+                Retry connection
+              </Button>
+            </div>
+          )}
+          {health?.execution_mode === "browser" && (
+            <p className="hint">
+              Up to 20 pages · 12 megapixels per page · 8 MB per page after PNG
+              conversion. Keep this tab open while translating.
+            </p>
+          )}
+          {health?.execution_mode === "browser" &&
+            !health.storage_configured && (
+              <p role="alert" className="error">
+                Cloud storage setup is pending. Imports will become available
+                when Supabase is configured.
+              </p>
+            )}
         </section>
         <aside className="import-aside">
           <div className="eyebrow">A LITTLE PEACE OF MIND</div>
@@ -379,16 +436,24 @@ export default function Translate() {
                       value={provider}
                       onChange={(e) => setProvider(e.target.value)}
                     >
-                      {(health?.execution_mode === "browser" ? ["deepl"] : ["deepl", "argos", "openai", "ollama", "google", "azure"]).map(
-                        (p) => (
-                          <option key={p} value={p}>
-                            {p === "argos" ? "Argos · Offline CPU" : p}
-                            {health && !health.providers[p]
-                              ? " · Unconfigured"
-                              : ""}
-                          </option>
-                        ),
-                      )}
+                      {(health?.execution_mode === "browser"
+                        ? ["deepl"]
+                        : [
+                            "deepl",
+                            "argos",
+                            "openai",
+                            "ollama",
+                            "google",
+                            "azure",
+                          ]
+                      ).map((p) => (
+                        <option key={p} value={p}>
+                          {p === "argos" ? "Argos · Offline CPU" : p}
+                          {health && !health.providers[p]
+                            ? " · Unconfigured"
+                            : ""}
+                        </option>
+                      ))}
                     </select>
                   </label>
                   <label className="field">
@@ -408,10 +473,17 @@ export default function Translate() {
                       value={quality}
                       onChange={(e) => setQuality(e.target.value)}
                     >
-                      {health?.execution_mode === "browser" ? <option value="quality">Cloud OCR · Review required</option> : <>
-                      <option value="quality">Maximum Quality</option>
-                      <option value="balanced">Balanced</option>
-                      <option value="fast">Fast</option></>}
+                      {health?.execution_mode === "browser" ? (
+                        <option value="quality">
+                          Cloud OCR · Review required
+                        </option>
+                      ) : (
+                        <>
+                          <option value="quality">Maximum Quality</option>
+                          <option value="balanced">Balanced</option>
+                          <option value="fast">Fast</option>
+                        </>
+                      )}
                     </select>
                   </label>
                   <label className="field">
@@ -420,11 +492,12 @@ export default function Translate() {
                       value={style}
                       onChange={(e) => setStyle(e.target.value)}
                     >
-                      {(health?.execution_mode === "browser" ? ["natural"] : ["faithful", "natural", "literal", "concise"]).map(
-                        (s) => (
-                          <option key={s}>{s}</option>
-                        ),
-                      )}
+                      {(health?.execution_mode === "browser"
+                        ? ["natural"]
+                        : ["faithful", "natural", "literal", "concise"]
+                      ).map((s) => (
+                        <option key={s}>{s}</option>
+                      ))}
                     </select>
                   </label>
                 </div>
@@ -443,7 +516,9 @@ export default function Translate() {
                   </p>
                 )}
                 <p className="hint">
-                  {health?.execution_mode === "browser" ? "OCR.space receives page images and DeepL receives recognized dialogue. This tab coordinates processing and renders each result. Closing it pauses unfinished work; reopen the chapter to resume. Review recognized text and cleanup before exporting." : "DeepL translates recognized dialogue using nearby text for context. Maximum Quality runs local OCR recovery. Configured OCR.space receives page images. Review uncertain regions before exporting."}
+                  {health?.execution_mode === "browser"
+                    ? "OCR.space receives page images and DeepL receives recognized dialogue. This tab coordinates processing and renders each result. Closing it pauses unfinished work; reopen the chapter to resume. Review recognized text and cleanup before exporting."
+                    : "DeepL translates recognized dialogue using nearby text for context. Maximum Quality runs local OCR recovery. Configured OCR.space receives page images. Review uncertain regions before exporting."}
                 </p>
                 {error && (
                   <div role="alert" className="error">

@@ -224,3 +224,35 @@ test("API rejects foreign origins, competing claims and stale processing tokens"
     (await request.delete("/api/projects/" + project.id, { headers })).ok(),
   ).toBeTruthy();
 });
+
+test("import waits for service discovery before choosing an upload route", async ({
+  page,
+}) => {
+  let release!: () => void;
+  const gate = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  await page.route("**/api/health", async (route) => {
+    await gate;
+    await route.continue();
+  });
+  await page.goto("/translate", { waitUntil: "domcontentloaded" });
+  await page
+    .locator('input[type="file"]')
+    .setInputFiles({
+      name: "test.png",
+      mimeType: "image/png",
+      buffer: Buffer.from("fixture"),
+    });
+  await page.getByLabel("I have permission to upload").check();
+  await expect(
+    page.getByRole("button", { name: "Connecting services" }),
+  ).toBeDisabled();
+  release();
+  await expect(
+    page.getByRole("button", { name: "Preview chapter" }),
+  ).toBeEnabled();
+  await expect(
+    page.getByText("Up to 20 pages", { exact: false }),
+  ).toBeVisible();
+});
