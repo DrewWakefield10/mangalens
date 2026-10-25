@@ -122,7 +122,11 @@ export default function Editor({
       setRedo([]);
     }
   }, [region?.id, page?.id, region?.source_text, region?.render.page_version]);
-  async function recover(path: string, body?: unknown, queuedMessage = "OCR queued. Saved corrections are preserved; retry results appear as suggestions.") {
+  async function recover(
+    path: string,
+    body?: unknown,
+    queuedMessage = "OCR queued. Saved corrections are preserved; retry results appear as suggestions.",
+  ) {
     setBusy(true);
     setError("");
     try {
@@ -173,7 +177,11 @@ export default function Editor({
         setDraft(draftOf(added));
         await client.invalidateQueries({ queryKey: ["regions", page.id] });
         await client.invalidateQueries({ queryKey: ["project", id] });
-        setNotice(p.execution_mode === "browser" ? "Region added. Enter source text and translation, then save." : "Region added. OCR is running on your selection.");
+        setNotice(
+          p.execution_mode === "browser"
+            ? "Region added. Enter source text and translation, then save."
+            : "Region added. OCR is running on your selection.",
+        );
       } catch (e) {
         setError((e as Error).message);
       } finally {
@@ -273,7 +281,10 @@ export default function Editor({
           </select>
         </label>
         <div className="segmented">
-          {(p.execution_mode === "browser" ? ["original", "clean", "translated", "mask"] : ["original", "clean", "translated", "mask", "candidate"]).map((v) => (
+          {(p.execution_mode === "browser"
+            ? ["original", "clean", "translated", "mask"]
+            : ["original", "clean", "translated", "mask", "candidate"]
+          ).map((v) => (
             <button
               key={v}
               className={v === view ? "selected" : ""}
@@ -294,7 +305,11 @@ export default function Editor({
           Add Text Region
         </Button>
         <label className="check-field">
-          <input type="checkbox" checked={showRegions} onChange={(e) => setShowRegions(e.target.checked)} />
+          <input
+            type="checkbox"
+            checked={showRegions}
+            onChange={(e) => setShowRegions(e.target.checked)}
+          />
           Show region boxes
         </label>
         <label>
@@ -313,14 +328,40 @@ export default function Editor({
         </label>
         <Button
           variant="outline"
-          disabled={busy || p.active || !page || p.execution_mode === "browser"}
-          title={p.execution_mode === "browser" ? "Use Resume page on the chapter dashboard to retry unfinished recognition." : undefined}
+          disabled={busy || p.active || !page || dirty.current}
+          title={
+            dirty.current
+              ? "Save your changes before retrying OCR."
+              : p.execution_mode === "browser"
+                ? "Read this page again, keeping saved manual corrections."
+                : undefined
+          }
           onClick={() =>
             recover("/pages/" + page!.id + "/ocr", { source_lang: ocrLanguage })
           }
         >
           Retry page OCR
         </Button>
+        {p.execution_mode === "browser" && (
+          <Button
+            variant="outline"
+            disabled={busy || p.active || !page || dirty.current}
+            title={
+              dirty.current
+                ? "Save your changes before rebuilding this page."
+                : "Regroup saved dialogue and rebuild translation and cleanup without repeating completed OCR."
+            }
+            onClick={() =>
+              recover(
+                "/pages/" + page!.id + "/rebuild",
+                undefined,
+                "Rebuilding page translation and cleanup. Saved manual corrections are preserved.",
+              )
+            }
+          >
+            Rebuild page translation
+          </Button>
+        )}
         <span className="hint">
           {drawMode
             ? "Drag around the area on the original page. Click the active tool to cancel."
@@ -328,10 +369,18 @@ export default function Editor({
         </span>
       </div>
       {view === "mask" && (
-        <p className="hint">White pixels are the removal mask actually applied to Clean. Numbered outlines show detected regions, including those left unchanged for review.</p>
+        <p className="hint">
+          White pixels are the removal mask actually applied to Clean. Numbered
+          outlines show detected regions, including those left unchanged for
+          review.
+        </p>
       )}
       {view === "candidate" && (
-        <p className="hint">Pink pixels are the selected region’s proposed mask on the original page. They are diagnostic only; compare with Mask to see what was actually removed. Save mask edits before previewing them.</p>
+        <p className="hint">
+          Pink pixels are the selected region’s proposed mask on the original
+          page. They are diagnostic only; compare with Mask to see what was
+          actually removed. Save mask edits before previewing them.
+        </p>
       )}
       {page && (
         <div className="editor-layout">
@@ -372,44 +421,62 @@ export default function Editor({
                 view === "original" || !ready(page)
                   ? page.original
                   : view === "candidate"
-                  ? region
-                    ? "/api/regions/" + region.id + "/mask-candidate?v=" + page.revision
-                    : page.original
-                  : "/api/pages/" +
-                    page.id +
-                    "/image/" +
-                    view +
-                    "?v=" +
-                    page.revision
+                    ? region
+                      ? "/api/regions/" +
+                        region.id +
+                        "/mask-candidate?v=" +
+                        page.revision
+                      : page.original
+                    : "/api/pages/" +
+                      page.id +
+                      "/image/" +
+                      view +
+                      "?v=" +
+                      page.revision
               }
               alt={"Page " + (index + 1) + " " + view}
               draggable={false}
             />
-            {showRegions && regions?.map((r, i) => (
-              <button
-                key={r.id}
-                className={
-                  "region-box " + diagnosticTone(r) + " " + (selected === r.id ? "selected" : "")
-                }
-                aria-label={"Edit region " + (i + 1) + ", " + String(r.render.diagnostic_status || "needs review")}
-                title={String(r.render.diagnostic_status || "needs review") + ": " + String(r.render.failure_reason || r.source_text || "No text")}
-                style={{
-                  pointerEvents: drawMode ? "none" : "auto",
-                  left: (r.box[0] / page.width) * 100 + "%",
-                  top: (r.box[1] / page.height) * 100 + "%",
-                  width: (r.box[2] / page.width) * 100 + "%",
-                  height: (r.box[3] / page.height) * 100 + "%",
-                }}
-                onClick={() => {
-                  setSelected(r.id);
-                  draftRegion.current = r.id;
-                  dirty.current = false;
-                  setDraft(draftOf(r));
-                }}
-              >
-                <span>{i + 1}</span>
-              </button>
-            ))}
+            {showRegions &&
+              regions?.map((r, i) => (
+                <button
+                  key={r.id}
+                  className={
+                    "region-box " +
+                    diagnosticTone(r) +
+                    " " +
+                    (selected === r.id ? "selected" : "")
+                  }
+                  aria-label={
+                    "Edit region " +
+                    (i + 1) +
+                    ", " +
+                    String(r.render.diagnostic_status || "needs review")
+                  }
+                  title={
+                    String(r.render.diagnostic_status || "needs review") +
+                    ": " +
+                    String(
+                      r.render.failure_reason || r.source_text || "No text",
+                    )
+                  }
+                  style={{
+                    pointerEvents: drawMode ? "none" : "auto",
+                    left: (r.box[0] / page.width) * 100 + "%",
+                    top: (r.box[1] / page.height) * 100 + "%",
+                    width: (r.box[2] / page.width) * 100 + "%",
+                    height: (r.box[3] / page.height) * 100 + "%",
+                  }}
+                  onClick={() => {
+                    setSelected(r.id);
+                    draftRegion.current = r.id;
+                    dirty.current = false;
+                    setDraft(draftOf(r));
+                  }}
+                >
+                  <span>{i + 1}</span>
+                </button>
+              ))}
             {selection && (
               <div
                 aria-label="New region selection"
@@ -456,37 +523,86 @@ export default function Editor({
                 ))}
                 <p className="hint">
                   Stage:{" "}
-                  {String(region.render.diagnostic_status || region.render.state || "detected").replaceAll(
-                    "_",
-                    " ",
-                  )}
+                  {String(
+                    region.render.diagnostic_status ||
+                      region.render.state ||
+                      "detected",
+                  ).replaceAll("_", " ")}
                 </p>
                 <details className="region-diagnostics">
                   <summary>Region diagnostics</summary>
                   <p className="hint">ID: {region.id}</p>
-                  <p className="hint">Type: {String(region.render.classification || region.kind || "unclassified").replaceAll("_", " ")} · evidence: {String(region.render.text_evidence || "unrated")}</p>
-                  <p className="hint">Language: {region.language} · OCR: {String(region.render.ocr_engine || "manual")}</p>
-                  <p className="hint">Source: {region.source_text || "No text recognized"}</p>
-                  <p className="hint">Translation: {region.translation || "Pending"}</p>
                   <p className="hint">
-                    Mask: {String(region.render.mask_status || "not checked").replaceAll("_", " ")} · {String(region.render.mask_candidate_pixels ?? 0)} candidate pixels · {String(region.render.mask_applied_pixels ?? 0)} applied pixels
+                    Type:{" "}
+                    {String(
+                      region.render.classification ||
+                        region.kind ||
+                        "unclassified",
+                    ).replaceAll("_", " ")}{" "}
+                    · evidence:{" "}
+                    {String(region.render.text_evidence || "unrated")}
                   </p>
-                  {Boolean(region.render.mask_failure_reason) && <p className="note">{String(region.render.mask_failure_reason)}</p>}
-                  {Boolean(region.render.failure_reason) && <p className="note">{String(region.render.failure_reason)}</p>}
+                  <p className="hint">
+                    Language: {region.language} · OCR:{" "}
+                    {String(region.render.ocr_engine || "manual")}
+                  </p>
+                  <p className="hint">
+                    Source: {region.source_text || "No text recognized"}
+                  </p>
+                  <p className="hint">
+                    Translation: {region.translation || "Pending"}
+                  </p>
+                  <p className="hint">
+                    Mask:{" "}
+                    {String(
+                      region.render.mask_status || "not checked",
+                    ).replaceAll("_", " ")}{" "}
+                    · {String(region.render.mask_candidate_pixels ?? 0)}{" "}
+                    candidate pixels ·{" "}
+                    {String(region.render.mask_applied_pixels ?? 0)} applied
+                    pixels
+                  </p>
+                  {Boolean(region.render.mask_failure_reason) && (
+                    <p className="note">
+                      {String(region.render.mask_failure_reason)}
+                    </p>
+                  )}
+                  {Boolean(region.render.failure_reason) && (
+                    <p className="note">
+                      {String(region.render.failure_reason)}
+                    </p>
+                  )}
                   {Boolean(region.render.stage_statuses) && (
                     <div>
                       <strong>Current stages</strong>
                       <ul className="region-stage-list">
-                        {Object.entries(region.render.stage_statuses as Record<string, { status: string; reason?: string }>).map(([stage, result]) => (
-                          <li key={stage}>{stage}: {result.status.replaceAll("_", " ")}{result.reason ? ": " + result.reason : ""}</li>
+                        {Object.entries(
+                          region.render.stage_statuses as Record<
+                            string,
+                            { status: string; reason?: string }
+                          >,
+                        ).map(([stage, result]) => (
+                          <li key={stage}>
+                            {stage}: {result.status.replaceAll("_", " ")}
+                            {result.reason ? ": " + result.reason : ""}
+                          </li>
                         ))}
                       </ul>
                     </div>
                   )}
                   {Array.isArray(region.render.stage_history) && (
                     <ol className="region-stage-list">
-                      {(region.render.stage_history as { status: string; reason?: string; at?: number }[]).map((step, i) => (
-                        <li key={i}>{step.status.replaceAll("_", " ")}{step.reason ? ": " + step.reason : ""}</li>
+                      {(
+                        region.render.stage_history as {
+                          status: string;
+                          reason?: string;
+                          at?: number;
+                        }[]
+                      ).map((step, i) => (
+                        <li key={i}>
+                          {step.status.replaceAll("_", " ")}
+                          {step.reason ? ": " + step.reason : ""}
+                        </li>
                       ))}
                     </ol>
                   )}
@@ -509,10 +625,20 @@ export default function Editor({
                 )}
                 {Boolean(region.render.ocr_cloud_suggestion) && (
                   <div className="note">
-                    <p>OCR.space crop suggestion: {String(region.render.ocr_cloud_suggestion)}</p>
+                    <p>
+                      OCR.space crop suggestion:{" "}
+                      {String(region.render.ocr_cloud_suggestion)}
+                    </p>
                     <Button
                       variant="outline"
-                      onClick={() => change({ source_text: String(region.render.ocr_cloud_suggestion), source_verified: false })}
+                      onClick={() =>
+                        change({
+                          source_text: String(
+                            region.render.ocr_cloud_suggestion,
+                          ),
+                          source_verified: false,
+                        })
+                      }
                     >
                       Use crop suggestion
                     </Button>
@@ -521,7 +647,11 @@ export default function Editor({
                 <Button
                   variant="outline"
                   disabled={busy || p.active || p.execution_mode === "browser"}
-                  title={p.execution_mode === "browser" ? "Edit source text manually in this hosted version." : undefined}
+                  title={
+                    p.execution_mode === "browser"
+                      ? "Edit source text manually in this hosted version."
+                      : undefined
+                  }
                   onClick={() => recover("/regions/" + region.id + "/ocr")}
                 >
                   Retry region OCR
@@ -531,21 +661,34 @@ export default function Editor({
                     <Button
                       key={stage}
                       variant="outline"
-                      disabled={busy || p.active || p.execution_mode === "browser"}
-                      title={p.execution_mode === "browser" ? "Save the region to rerender its page." : undefined}
-                      onClick={() => recover(
-                        "/regions/" + region.id + "/retry/" + stage,
-                        undefined,
-                        `${stage === "mask" ? "Mask regeneration" : stage === "clean" ? "Cleanup" : "Typesetting"} queued for this region. Saved OCR and translations will be reused.`,
-                      )}
+                      disabled={
+                        busy || p.active || p.execution_mode === "browser"
+                      }
+                      title={
+                        p.execution_mode === "browser"
+                          ? "Save the region to rerender its page."
+                          : undefined
+                      }
+                      onClick={() =>
+                        recover(
+                          "/regions/" + region.id + "/retry/" + stage,
+                          undefined,
+                          `${stage === "mask" ? "Mask regeneration" : stage === "clean" ? "Cleanup" : "Typesetting"} queued for this region. Saved OCR and translations will be reused.`,
+                        )
+                      }
                     >
-                      {stage === "mask" ? "Regenerate mask" : stage === "clean" ? "Retry cleanup" : "Retry rendering"}
+                      {stage === "mask"
+                        ? "Regenerate mask"
+                        : stage === "clean"
+                          ? "Retry cleanup"
+                          : "Retry rendering"}
                     </Button>
                   ))}
                 </div>
                 <label className="field">
                   Recognized source
-                  <textarea className="resize-none"
+                  <textarea
+                    className="resize-none"
                     rows={3}
                     value={draft.source_text}
                     onChange={(e) => change({ source_text: e.target.value })}
@@ -566,7 +709,8 @@ export default function Editor({
                 </label>
                 <label className="field">
                   Translation
-                  <textarea className="resize-none"
+                  <textarea
+                    className="resize-none"
                     rows={4}
                     value={draft.translation}
                     onChange={(e) => change({ translation: e.target.value })}
@@ -703,7 +847,9 @@ export default function Editor({
                   />{" "}
                   Preserve original lettering in this region
                 </label>
-                <p className="hint">Use this for sound effects or lettering you want to keep.</p>
+                <p className="hint">
+                  Use this for sound effects or lettering you want to keep.
+                </p>
                 <div className="actions">
                   <button
                     className="icon-button"
@@ -809,9 +955,12 @@ export default function Editor({
       <section className="panel glossary">
         <h2>Chapter glossary</h2>
         <p>
-          One entry per line: source = translation. DeepL uses exact whole-region matches in the hosted version. Other providers in local mode may receive glossary terms as context.
+          One entry per line: source = translation. DeepL uses exact
+          whole-region matches in the hosted version. Other providers in local
+          mode may receive glossary terms as context.
         </p>
-        <textarea className="resize-none"
+        <textarea
+          className="resize-none"
           aria-label="Glossary entries"
           rows={4}
           value={glossaryText}

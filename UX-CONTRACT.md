@@ -31,3 +31,20 @@ processing is an approved hosted variant; local FastAPI routing remains availabl
 - Hosted import: PNG/JPG/WebP, image ZIP/CBZ, PDF; 20 pages, 64 MB compressed input,
   128 MB expanded data, 12 MP/8 MB normalized PNG per page. SQL also caps global
   stored pages. Remote imports and offline models are unavailable in this mode.
+
+## Dialogue layout and cleanup
+
+Cloud processing groups OCR columns by enclosed white speech areas and provider
+paragraphs before translation. Vertical CJK dialogue uses provider reading order
+when available, with geometric right-to-left column ordering as a fallback.
+English wraps as words within balloon contours. Source lettering and placement
+boxes remain separate. Cleanup includes isolated lettering and small annotations
+inside the balloon while retaining its outline and protected artwork.
+
+The editor's Rebuild page translation action reuses completed OCR. Retry page OCR
+explicitly recognizes the page again. Both preserve saved manual corrections;
+unsaved drafts must be saved first. Retry budgets are cumulative. Original files
+remain unchanged. Each region reports applied mask pixels or the reason its
+original lettering was preserved. Decorative lettering over complex artwork
+remains a manual-review case; saved translations are not treated as rendered
+translations. Existing pages need an explicit rebuild or OCR retry after refresh.
