@@ -6,6 +6,7 @@ COPY app ./app
 COPY components ./components
 COPY lib ./lib
 COPY public ./public
+COPY scripts/prepare-browser-assets.mjs ./scripts/prepare-browser-assets.mjs
 COPY next.config.ts next-env.d.ts tsconfig.json postcss.config.mjs ./
 ENV API_INTERNAL_URL=http://api:8000 NEXT_TELEMETRY_DISABLED=1
 RUN npm run build

@@ -25,6 +25,7 @@ export default function Translate() {
   const [title, setTitle] = useState("");
   const [authorized, setAuthorized] = useState(false);
   const [busy, setBusy] = useState(false);
+  const [importStatus, setImportStatus] = useState("");
   const [error, setError] = useState("");
   const [project, setProject] = useState<Project | null>(null);
   const [source, setSource] = useState("ja");
@@ -43,6 +44,7 @@ export default function Translate() {
   useEffect(() => {
     if (health && !health.providers[provider]) setProvider(health.default_provider);
   }, [health, provider]);
+  useEffect(() => { if (health?.execution_mode === "browser") { setQuality("quality"); setStyle("natural"); } }, [health?.execution_mode]);
   const offlineUnavailable = (language: string) =>
     provider === "argos" &&
     source !== "auto" &&
@@ -79,7 +81,10 @@ export default function Translate() {
     setBusy(true);
     try {
       let result: Project;
-      if (files.length) {
+      if (health?.execution_mode === "browser") {
+        const { importCloud } = await import("@/lib/browser-pages");
+        result = await importCloud(files, title, authorized, setImportStatus);
+      } else if (files.length) {
         const form = new FormData();
         files.forEach((f) => form.append("files", f));
         form.append("title", title || files[0].name.replace(/\.[^.]+$/, ""));
@@ -95,6 +100,7 @@ export default function Translate() {
       setError((e as Error).message);
     } finally {
       setBusy(false);
+      setImportStatus("");
     }
   }
   async function start() {
@@ -207,6 +213,7 @@ export default function Translate() {
               ))}
             </div>
           )}
+          {health?.execution_mode !== "browser" && <>
           <div className="divider-label">OR IMPORT AN AUTHORIZED SOURCE</div>
           <label className="input-icon">
             <Link2 size={18} />
@@ -225,6 +232,7 @@ export default function Translate() {
               ? "Enabled hosts: " + health.source_hosts.join(", ")
               : "No remote sources are enabled. Upload your files, or configure an authorized JSON manifest host on the server."}
           </p>
+          </>}
           <label className="check-field">
             <input
               type="checkbox"
@@ -239,12 +247,15 @@ export default function Translate() {
             </div>
           )}
           <Button
-            disabled={busy || !authorized || (!files.length && !url)}
+            disabled={busy || !authorized || (health?.execution_mode === "browser" ? !files.length || !health.storage_configured : !files.length && !url)}
             onClick={importPages}
           >
             {busy ? "Importing pages…" : "Preview chapter"}
             <ArrowRight size={17} />
           </Button>
+          {busy && <p role="status" className="hint">{importStatus || "Importing your pages…"}</p>}
+          {health?.execution_mode === "browser" && <p className="hint">Up to 20 pages · 12 megapixels per page · 8 MB per page after PNG conversion. Keep this tab open while translating.</p>}
+          {health?.execution_mode === "browser" && !health.storage_configured && <p role="alert" className="error">Cloud storage setup is pending. Imports will become available when Supabase is configured.</p>}
         </section>
         <aside className="import-aside">
           <div className="eyebrow">A LITTLE PEACE OF MIND</div>
@@ -265,7 +276,7 @@ export default function Translate() {
               <Check size={18} /> Editable text and translations
             </li>
             <li>
-              <Check size={18} /> Automatic cleanup after{" "}
+              <Check size={18} /> Projects expire after{" "}
               {health?.retention_days || 7} days
             </li>
           </ul>
@@ -368,7 +379,7 @@ export default function Translate() {
                       value={provider}
                       onChange={(e) => setProvider(e.target.value)}
                     >
-                      {["deepl", "argos", "openai", "ollama", "google", "azure"].map(
+                      {(health?.execution_mode === "browser" ? ["deepl"] : ["deepl", "argos", "openai", "ollama", "google", "azure"]).map(
                         (p) => (
                           <option key={p} value={p}>
                             {p === "argos" ? "Argos · Offline CPU" : p}
@@ -397,9 +408,10 @@ export default function Translate() {
                       value={quality}
                       onChange={(e) => setQuality(e.target.value)}
                     >
+                      {health?.execution_mode === "browser" ? <option value="quality">Cloud OCR · Review required</option> : <>
                       <option value="quality">Maximum Quality</option>
                       <option value="balanced">Balanced</option>
-                      <option value="fast">Fast</option>
+                      <option value="fast">Fast</option></>}
                     </select>
                   </label>
                   <label className="field">
@@ -408,7 +420,7 @@ export default function Translate() {
                       value={style}
                       onChange={(e) => setStyle(e.target.value)}
                     >
-                      {["faithful", "natural", "literal", "concise"].map(
+                      {(health?.execution_mode === "browser" ? ["natural"] : ["faithful", "natural", "literal", "concise"]).map(
                         (s) => (
                           <option key={s}>{s}</option>
                         ),
@@ -431,11 +443,7 @@ export default function Translate() {
                   </p>
                 )}
                 <p className="hint">
-                  DeepL translates recognized dialogue using nearby and earlier
-                  text for context. Maximum Quality runs the full local OCR
-                  recovery pipeline. With an OCR.space key, page images are
-                  sent to its free endpoint for recognition. Uncertain
-                  regions remain available for manual review.
+                  {health?.execution_mode === "browser" ? "OCR.space receives page images and DeepL receives recognized dialogue. This tab coordinates processing and renders each result. Closing it pauses unfinished work; reopen the chapter to resume. Review recognized text and cleanup before exporting." : "DeepL translates recognized dialogue using nearby text for context. Maximum Quality runs local OCR recovery. Configured OCR.space receives page images. Review uncertain regions before exporting."}
                 </p>
                 {error && (
                   <div role="alert" className="error">

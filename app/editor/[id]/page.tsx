@@ -14,6 +14,7 @@ import { useProject } from "@/components/project-hooks";
 import { api, Region, ready, languages } from "@/lib/api";
 import { Button } from "@/components/ui/button";
 type Draft = {
+  page_version: number;
   source_text: string;
   translation: string;
   language: string;
@@ -31,6 +32,7 @@ type Draft = {
 };
 function draftOf(r: Region): Draft {
   return {
+    page_version: Number(r.render.page_version) || 1,
     source_text: r.source_text,
     translation: r.translation,
     language: r.language,
@@ -119,7 +121,7 @@ export default function Editor({
       setUndo([]);
       setRedo([]);
     }
-  }, [region?.id, page?.id, region?.source_text]);
+  }, [region?.id, page?.id, region?.source_text, region?.render.page_version]);
   async function recover(path: string, body?: unknown, queuedMessage = "OCR queued. Saved corrections are preserved; retry results appear as suggestions.") {
     setBusy(true);
     setError("");
@@ -164,14 +166,14 @@ export default function Editor({
           body: JSON.stringify({
             box: selection,
             language: ocrLanguage,
-            run_ocr: true,
+            run_ocr: p.execution_mode !== "browser",
           }),
         });
         setSelected(added.id);
         setDraft(draftOf(added));
         await client.invalidateQueries({ queryKey: ["regions", page.id] });
         await client.invalidateQueries({ queryKey: ["project", id] });
-        setNotice("Region added. OCR is running on your selection.");
+        setNotice(p.execution_mode === "browser" ? "Region added. Enter source text and translation, then save." : "Region added. OCR is running on your selection.");
       } catch (e) {
         setError((e as Error).message);
       } finally {
@@ -271,7 +273,7 @@ export default function Editor({
           </select>
         </label>
         <div className="segmented">
-          {["original", "clean", "translated", "mask", "candidate"].map((v) => (
+          {(p.execution_mode === "browser" ? ["original", "clean", "translated", "mask"] : ["original", "clean", "translated", "mask", "candidate"]).map((v) => (
             <button
               key={v}
               className={v === view ? "selected" : ""}
@@ -311,7 +313,8 @@ export default function Editor({
         </label>
         <Button
           variant="outline"
-          disabled={busy || p.active || !page}
+          disabled={busy || p.active || !page || p.execution_mode === "browser"}
+          title={p.execution_mode === "browser" ? "Use Resume page on the chapter dashboard to retry unfinished recognition." : undefined}
           onClick={() =>
             recover("/pages/" + page!.id + "/ocr", { source_lang: ocrLanguage })
           }
@@ -517,7 +520,8 @@ export default function Editor({
                 )}
                 <Button
                   variant="outline"
-                  disabled={busy || p.active}
+                  disabled={busy || p.active || p.execution_mode === "browser"}
+                  title={p.execution_mode === "browser" ? "Edit source text manually in this hosted version." : undefined}
                   onClick={() => recover("/regions/" + region.id + "/ocr")}
                 >
                   Retry region OCR
@@ -527,7 +531,8 @@ export default function Editor({
                     <Button
                       key={stage}
                       variant="outline"
-                      disabled={busy || p.active}
+                      disabled={busy || p.active || p.execution_mode === "browser"}
+                      title={p.execution_mode === "browser" ? "Save the region to rerender its page." : undefined}
                       onClick={() => recover(
                         "/regions/" + region.id + "/retry/" + stage,
                         undefined,
@@ -540,7 +545,7 @@ export default function Editor({
                 </div>
                 <label className="field">
                   Recognized source
-                  <textarea
+                  <textarea className="resize-none"
                     rows={3}
                     value={draft.source_text}
                     onChange={(e) => change({ source_text: e.target.value })}
@@ -561,7 +566,7 @@ export default function Editor({
                 </label>
                 <label className="field">
                   Translation
-                  <textarea
+                  <textarea className="resize-none"
                     rows={4}
                     value={draft.translation}
                     onChange={(e) => change({ translation: e.target.value })}
@@ -804,10 +809,9 @@ export default function Editor({
       <section className="panel glossary">
         <h2>Chapter glossary</h2>
         <p>
-          One entry per line: source = translation. LLM providers receive all
-          terms as context; other providers apply exact whole-region matches.
+          One entry per line: source = translation. DeepL uses exact whole-region matches in the hosted version. Other providers in local mode may receive glossary terms as context.
         </p>
-        <textarea
+        <textarea className="resize-none"
           aria-label="Glossary entries"
           rows={4}
           value={glossaryText}

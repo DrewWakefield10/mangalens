@@ -1,54 +1,85 @@
-# Root Vercel deployment
+# Vercel and Supabase deployment
 
-MangaLens now uses one root Next.js package, one lockfile and one Vercel project. `vercel.json` selects Next.js, `npm ci`, `npm run build` and `.next`. Existing frontend routes and UI were moved without a framework rewrite. `scripts/dev.py` still starts the API, worker and web app together; `--production` serves an existing production build for verification. Docker Compose still runs the complete stack using the root web Dockerfile.
+The root Next.js app includes a hosted processing mode. On Vercel, leave
+`API_INTERNAL_URL` unset to select it. This mode requires no Python service or
+background worker. The owner's computer can be off. A visitor's browser tab
+coordinates processing and must stay open until it finishes.
 
-A fresh install also exposed an incomplete optional WASM dependency graph in the old lockfile. The lockfile was regenerated from the pinned manifest in an empty directory so that `npm ci` can reproduce installation rather than rely on pre-existing node_modules.
+## Request and storage flow
 
-## Architecture and exact remaining dependency
+Browser â†’ Vercel Next.js API â†’ authenticated Supabase Edge gateway â†’ private
+Postgres tables and Storage. Provider calls run on Vercel; DeepL and OCR.space
+keys never reach the browser. The gateway uses Supabase's built-in service-role
+credential internally and accepts a separate random bearer token from Vercel.
+Only the SHA-256 of that token is embedded in its deployed source.
 
-```text
-Browser → one Vercel domain
-            ├─ /, /translate, /projects, /editor, /read, /settings → Next.js
-            └─ /api/* → direct rewrite → existing persistent FastAPI host
-                                             ├─ database + stored page images
-                                             └─ durable worker
-                                                  ├─ Tesseract / Manga OCR
-                                                  ├─ Argos or configured translation API
-                                                  └─ OpenCV cleaning / Pillow typesetting
-```
+Images upload directly to signed Supabase URLs, avoiding Vercel's function
+payload limit. The browser decodes imports, creates overlapping JPEG OCR tiles,
+renders conservative white-background cleanup and translated text, and generates
+ZIP/CBZ/PDF exports. Original PNG files remain separate.
 
-The former split was a packaging issue for the frontend (`frontend/package.json` and subdirectory-only instructions) plus real backend runtime requirements. One root import is now supported. **A fully self-contained Vercel deployment is not provided.** No second Vercel import is needed; the existing backend host is still required. No external host is provisioned by this repository. A deployment without a reachable `API_INTERNAL_URL` has no working upload/processing API and is not considered complete.
+The browser saves progress after each recognized tile and each translated page.
+A five-minute page lease and optimistic document versions reject competing tabs
+and stale editor saves. Resume keeps saved text and translations. Failed or
+uncertain external requests count against the budget. An interrupted provider
+request can be repeated after resuming; exactly-once provider billing is not
+promised.
 
-Provider calls remain server-side on that backend: DeepL, OCR.space, optional Google/Azure/OpenAI-compatible services, or local Ollama as configured. External OCR/translation calls do not replace local detection, image processing, export, storage or background execution. Existing fallbacks, quotas, models and language options are preserved.
+## Setup
 
-## Vercel compatibility review (2026-10-25)
+1. Import the GitHub repository root into one Vercel project. Use Next.js,
+   Node 24.x, `npm ci`, `npm run build`, and default output.
+2. Inspect the target Supabase schema and buckets. Apply the checked-in
+   `browser_processing` migration to a new project. Its private tables enable RLS
+   and revoke access from anonymous and authenticated public roles. Only the
+   service role may call its budget and capacity functions.
+3. Generate a cryptographically random gateway token of at least 32 bytes.
+   Substitute its SHA-256 hex digest for `__MANGALENS_GATEWAY_HASH__` when deploying
+   `mangalens-gateway`. Keep `verify_jwt=false` because the function authenticates
+   its own bearer token. Do not put the actual token in the function source.
+4. Set encrypted, server-only Vercel variables `SUPABASE_URL`,
+   `MANGALENS_GATEWAY_SECRET`, `DEEPL_API_KEY` and `OCR_SPACE_API_KEY` for Production
+   and Preview. Use a DeepL API Free key and OCR.space free key. No browser
+   environment variables or Supabase service-role key are required.
+5. Deploy and verify health, session creation, upload, real OCR/translation,
+   images, editor save, exports and private session isolation.
 
-Official documentation checked during implementation:
+To test this mode locally, use ignored `.env.local` with `MANGALENS_CLOUD=1` and
+the same four server values. Local development otherwise uses the Python API.
 
-| Constraint | Actual pipeline consequence |
-| --- | --- |
-| [Function limits](https://vercel.com/docs/functions/limitations): 4.5 MB request/response payload; Fluid duration defaults/max 300 seconds on Hobby, up to 800 seconds on Pro/Enterprise, extended beta beyond that | Uploads allow 64 MB by default; page processing can approach 30 minutes. The API/worker is not wrapped in a Vercel Function. Increasing duration does not provide a durable worker. |
-| [Python runtime](https://vercel.com/docs/functions/runtimes/python): Python 3.12–3.14; dependency bundling, 500 MB standard bundle and 5 GB large-function beta | Backend needs native Tesseract language binaries, OpenCV, CTranslate2, fonts and optional Torch/Manga OCR, plus several GB of downloaded models. A larger bundle alone does not resolve execution/storage lifecycle. No claim that all native modules are categorically unsupported is made. |
-| [Function filesystem](https://github.com/vercel/vercel/discussions/5320), Vercel maintainer answer: temporary `/tmp` storage | Current backend writes durable originals, cleaned/translated images, masks, caches and possibly SQLite under `DATA_DIR`. Temporary function disk is unsuitable for shared API/worker state and retention. Keep persistent database/storage on the backend. |
-| [External proxy limits](https://vercel.com/docs/limits): 120-second request timeout | Normal upload/start/poll/image requests are proxied; page computation continues independently in the worker. Synchronous region OCR/retranslation, URL import or large export can exceed the proxy timeout. Those endpoints are preserved, but worst-case requests need live validation. A timeout must not be interpreted as successful processing. |
-| [External rewrites](https://vercel.com/docs/routing/rewrites) can serve an existing backend under the frontend origin | The direct rewrite avoids adding a Node Function between the browser and backend. The 4.5 MB Function limit is not presented as the external-rewrite upload limit. A >5 MB upload passed through the local production rewrite; real Vercel gateway/hosting limits remain unverified. |
-| [Build configuration](https://vercel.com/docs/builds/configure-a-build) supports project-root framework, install, build and output settings | The app now follows the root Next.js layout. Only Node dependencies are installed for Vercel; Python/native dependencies remain in the separate backend image. |
+## Free-mode limits
 
-Private API responses are `no-store`, with external-rewrite CDN caching explicitly disabled. Session cookies remain HttpOnly and same-origin. Only explicitly listed production/preview origins are accepted for mutations. Use secure cookies on HTTPS. No new storage, queue, paid provider or beta platform service is introduced.
+- At most 20 stored pages across all browser sessions, 10 chapters per session,
+  20 pages per import, 64 MiB input and 128 MiB expanded archive.
+- At most 12 megapixels per page and 8 MiB per normalized PNG.
+- Global OCR budget: 50 attempted tiles/day, 400/month, including at most
+  300 Engine 3 attempts/month. Every retry counts; no automatic paid fallback.
+- Global DeepL budget: 100,000 submitted characters/month. The provider's own
+  quota and rate limits also apply, including usage outside MangaLens.
+- Every output is marked for manual review. OCR.space supplies no confidence
+  scores. Complex backgrounds are preserved unless the user verifies an
+  explicit mask. Text that cannot fit at 12px preserves original lettering.
+- Projects expire after seven days. Library access removes expired files and
+  documents. This is lazy cleanup, not an exact deletion deadline. Download
+  important results before expiry.
+- Temporary libraries belong to an HttpOnly browser cookie. Clearing cookies or
+  switching hostname/browser starts another library; there is no account
+  recovery or public sharing feature.
+- Provider limits, Vercel Hobby limits, and Supabase Free quotas can pause
+  processing. Supabase may pause inactive free projects. This setup does not
+  enable a paid plan, metered upgrade, always-on worker or billing fallback.
 
-## Configuration and migration
+The Python deployment retains local OCR/models, OpenCV and broader provider
+features. For that mode, supply an HTTPS `API_INTERNAL_URL` and keep the API and
+worker running on a persistent host. Hosted browser libraries do not migrate
+existing Python database files.
 
-Use the exact [README settings and migration procedure](../README.md#one-repository-import-one-vercel-project). The only Vercel application setting is server-side/build-time `API_INTERNAL_URL`. All other server variables, including `DEEPL_API_KEY`, `OCR_SPACE_API_KEY`, `DATABASE_URL`, `DATA_DIR`, `MODEL_DIR`, `FONT_PATH`, `COOKIE_SECURE`, `ALLOWED_ORIGIN` and budgets, belong on the backend/worker host. No browser environment variables are required. Root `.env.example` documents required versus optional settings; `.env`, `.env.*`, `.vercel`, images, databases and models remain excluded from Git/deployment source uploads.
+## Local verification
 
-Keep the existing backend and old frontend until a real preview has passed session, upload, processing, editor and export checks. No hosted project or production setting was modified automatically. Moving to an entirely new frontend hostname starts a new temporary session library; retain the old domain for access/rollback or use the existing domain after verification.
-
-## Verification evidence
-
-- Clean `npm ci`, production Next.js builds in local and Vercel modes, and explicit TypeScript checks passed from the root.
-- Three Node deployment regressions passed: local routing, hosted routing/private caching, and rejected invalid backend origins.
-- Five browser tests passed against the production root build and real local API/worker. They cover nested route refresh, cookie/session continuity, >5 MB multipart upload, image delivery, corrupt upload errors, real Japanese OCR + Argos processing, manual recovery, comparisons, editor save/retry and CBZ export.
-- Full backend suite: 97 tests passed, including the added exact production/preview-origin regression. One upstream Starlette/httpx deprecation warning remains.
-- `docker compose config --quiet` passed; no Docker runtime/build claim is made.
-- Browser static output scanned against three locally configured secret values: zero matches. No live provider charges were incurred; OCR/translation integrations were exercised through local inference and existing controlled provider tests.
-- Vercel CLI 65.2.0 `vercel build` was attempted and stopped with `project_settings_required`: no linked project settings are available in this workspace. No Vercel project was created or modified. A cloud build, real backend TLS/origin routing, gateway upload limits and production provider calls still require the configured preview deployment.
-- No standalone lint configuration exists in the repository; TypeScript and production compilation are the available code checks.
+`npm run typecheck`, `npm run test:deployment`, `npm run test:cloud`,
+`npm run build`, and `npm run test:cloud-browser` cover routing, real PostgreSQL
+migration/budget/access rules (PGlite), ownership and optimistic conflicts, OCR
+coordinate parsing, browser import/render/edit/export/deletion and mobile
+overflow. Browser fixture tests use fake storage and pre-recognized text; they
+do not prove live provider connectivity. Live verification must be recorded
+separately after configuration.

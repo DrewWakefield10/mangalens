@@ -61,3 +61,11 @@ Canonical actions use `components/ui/button.tsx`. Native labeled checkboxes use 
 - Report failures explicitly and retain original artwork when replacement cannot be rendered safely.
 - Do not imply successful translation from a completed request or conceal partial coverage.
 - Do not introduce a new visual system for these reliability changes.
+
+## Hosted browser processing
+
+The approved hosted variant preserves the existing visual identity. The shared
+BrowserProcessor status panel uses panel/text/accent tokens and remains in normal
+document flow on small screens. Browser exports and editor rendering use the same
+CJK font as the backend, self-hosted with its OFL license. Native selects remain
+platform-owned. UX-CONTRACT.md owns hosted progress, interruption, and recovery.

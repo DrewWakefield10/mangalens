@@ -11,11 +11,14 @@ const styles = cva("button", {
 export function Button({
   className,
   variant,
+  type = "button",
   ...props
 }: React.ButtonHTMLAttributes<HTMLButtonElement> &
   VariantProps<typeof styles>) {
   return (
     <button
+      type={type}
+      onClick={props.onClick}
       className={twMerge(clsx(styles({ variant }), className))}
       {...props}
     />

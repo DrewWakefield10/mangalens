@@ -1,6 +1,7 @@
 "use client";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { useEffect, useState } from "react";
+import BrowserProcessor from "./browser-processor";
 import { usePreferences } from "@/lib/store";
 export default function Providers({ children }: { children: React.ReactNode }) {
   const [client] = useState(
@@ -13,5 +14,5 @@ export default function Providers({ children }: { children: React.ReactNode }) {
   useEffect(() => {
     document.documentElement.dataset.theme = theme;
   }, [theme]);
-  return <QueryClientProvider client={client}>{children}</QueryClientProvider>;
+  return <QueryClientProvider client={client}><BrowserProcessor />{children}</QueryClientProvider>;
 }

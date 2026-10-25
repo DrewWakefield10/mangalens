@@ -7,7 +7,7 @@ export default defineConfig({
   use: {
     baseURL: process.env.PLAYWRIGHT_BASE_URL || "http://127.0.0.1:3000",
     headless: true,
-    channel: process.env.PLAYWRIGHT_CHANNEL || "msedge",
+    channel: process.env.PLAYWRIGHT_CHANNEL || (process.env.CLOUD_BROWSER_TEST === "1" ? undefined : "msedge"),
     screenshot: "only-on-failure",
   },
   reporter: "list",

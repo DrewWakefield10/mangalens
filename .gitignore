@@ -15,3 +15,5 @@ samples/sora-wo-matotte-chapter-34/
 test-results/
 playwright-report/
 *.log
+
+public/pdfjs/

@@ -3,37 +3,39 @@ import type { NextConfig } from "next";
 const isVercel = process.env.VERCEL === "1";
 const apiInternalUrl = process.env.API_INTERNAL_URL?.replace(/\/+$/, "");
 
-if (isVercel && !apiInternalUrl) {
-  throw new Error(
-    "API_INTERNAL_URL must be set to the deployed MangaLens API URL when building for Vercel.",
-  );
-}
-
-const apiUrl = new URL(apiInternalUrl || "http://127.0.0.1:8000");
+const cloudMode =
+  process.env.MANGALENS_CLOUD === "1" || (isVercel && !apiInternalUrl);
+const apiUrl = apiInternalUrl
+  ? new URL(apiInternalUrl)
+  : cloudMode
+    ? undefined
+    : new URL("http://127.0.0.1:8000");
 if (
-  !["http:", "https:"].includes(apiUrl.protocol) ||
-  (isVercel && apiUrl.protocol !== "https:") ||
-  apiUrl.pathname !== "/" ||
-  apiUrl.search ||
-  apiUrl.hash ||
-  apiUrl.username ||
-  apiUrl.password
-) {
+  apiUrl &&
+  (!["http:", "https:"].includes(apiUrl.protocol) ||
+    (isVercel && apiUrl.protocol !== "https:") ||
+    apiUrl.pathname !== "/" ||
+    apiUrl.search ||
+    apiUrl.hash ||
+    apiUrl.username ||
+    apiUrl.password)
+)
   throw new Error(
     "API_INTERNAL_URL must be an HTTP(S) origin without a path or credentials; Vercel requires HTTPS.",
   );
-}
 
 const config: NextConfig = {
   turbopack: { root: process.cwd() },
-  output: isVercel ? undefined : "standalone",
+  output: isVercel || cloudMode ? undefined : "standalone",
   async rewrites() {
-    return [
-      {
-        source: "/api/:path*",
-        destination: `${apiUrl.origin}/api/:path*`,
-      },
-    ];
+    return apiUrl
+      ? [
+          {
+            source: "/api/:path*",
+            destination: `${apiUrl.origin}/api/:path*`,
+          },
+        ]
+      : [];
   },
   async headers() {
     return [

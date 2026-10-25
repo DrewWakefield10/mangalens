@@ -34,7 +34,7 @@ export default function Home() {
           Translate manga, manhwa, and webtoons into your language
           <br className="desktop" /> while preserving the artwork you love.
         </p>
-        <form
+        <form noValidate
           className="import-bar"
           onSubmit={(e) => {
             e.preventDefault();
