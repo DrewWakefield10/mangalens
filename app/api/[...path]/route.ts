@@ -17,6 +17,7 @@ import {
 import { randomUUID } from "node:crypto";
 import { NextRequest, NextResponse } from "next/server";
 import type { Region } from "@/lib/api";
+import { BOUNDARY, CLEANUP, TOO_LONG, type LayoutDebug } from "@/lib/render-feedback";
 import {
   CLOUD_LIMITS as L,
   type CloudPage,
@@ -811,6 +812,7 @@ async function handler(req: NextRequest, ctx: Context) {
               reason: string;
               mask_pixels: number;
               font_size: number;
+              layout_debug: LayoutDebug;
             }
           >();
           for (const value of diagnosticInput) {
@@ -826,6 +828,19 @@ async function handler(req: NextRequest, ctx: Context) {
               )
             )
               fail(400, "Invalid rendering result.");
+            const layoutDebug: LayoutDebug = {};
+            for (const key of ["source", "placement", "rejected"] as const) {
+              const runs = value.layout_debug?.[key];
+              if (!Array.isArray(runs)) continue;
+              layoutDebug[key] = runs.slice(0, 400).map(run => {
+                if (!Array.isArray(run) || run.length !== 3)
+                  fail(400, "Invalid diagnostic pixels.");
+                const x = integer(run[0], 0, page.width - 1);
+                return [x, integer(run[1], 0, page.height - 1),
+                  integer(run[2], 1, page.width - x)];
+              });
+              layoutDebug[`${key}_truncated`] = value.layout_debug[`${key}_truncated`] === true;
+            }
             diagnostics.set(value.id, {
               status: value.status,
               reason: text(value.reason, 300),
@@ -835,6 +850,7 @@ async function handler(req: NextRequest, ctx: Context) {
                 page.width * page.height,
               ),
               font_size: Number(value.font_size) || 0,
+              layout_debug: layoutDebug,
             });
           }
           await mutate<CloudPage>(page.id, who, (p) => {
@@ -844,8 +860,10 @@ async function handler(req: NextRequest, ctx: Context) {
               if (!diagnostic) continue;
               r.render = {
                 ...r.render,
-                diagnostic_status:
-                  diagnostic.status === "PRESERVED" &&
+                diagnostic_status: diagnostic.reason === BOUNDARY ? "NEEDS_MANUAL_REVIEW"
+                  : diagnostic.reason === CLEANUP ? "INPAINTING_FAILED"
+                  : diagnostic.reason === TOO_LONG ? "RENDERING_FAILED"
+                  : diagnostic.status === "PRESERVED" &&
                   [
                     "OCR_FAILED",
                     "TRANSLATION_FAILED",
@@ -857,8 +875,8 @@ async function handler(req: NextRequest, ctx: Context) {
                 mask_applied_pixels: diagnostic.mask_pixels,
                 actual_font_size: diagnostic.font_size,
                 failure_reason: diagnostic.reason,
-                mask_failure_reason:
-                  diagnostic.status === "PRESERVED" ? diagnostic.reason : "",
+                mask_failure_reason: diagnostic.reason === CLEANUP ? diagnostic.reason : "",
+                layout_debug: diagnostic.layout_debug,
               };
             }
             const old = ["translated", "clean", "mask"].flatMap((k) =>
@@ -876,8 +894,7 @@ async function handler(req: NextRequest, ctx: Context) {
             const unresolved = p.regions.filter(
               (r) =>
                 !r.restored &&
-                (!r.render.source_verified ||
-                  diagnostics.get(r.id)?.status !== "RENDERED_NEEDS_REVIEW"),
+                (!r.render.source_verified || !r.render.actual_font_size),
             ).length;
             p.status = !p.bubble_scan!.bubbles.length
               ? "no_speech_bubbles"
@@ -886,7 +903,11 @@ async function handler(req: NextRequest, ctx: Context) {
                 : pending || unresolved
                   ? "needs_review"
                   : "completed";
-            p.error = warnings.join(" ");
+            p.error = [...new Set([...warnings, ...p.regions.flatMap(r =>
+              !diagnostics.has(r.id) && r.render.failure_reason
+                ? ["Region " + (p.regions.indexOf(r) + 1) + ": " + r.render.failure_reason]
+                : [],
+            )])].join(" ");
             p.metrics = {
               ...p.metrics,
               completion:
@@ -896,13 +917,10 @@ async function handler(req: NextRequest, ctx: Context) {
               unresolved_regions: pending + unresolved,
               completed_regions: p.regions.length - unresolved,
               processing_mode: "browser",
-              rendered_regions: [...diagnostics.values()].filter(
-                (d) => d.status === "RENDERED_NEEDS_REVIEW",
-              ).length,
-              preserved_regions: [...diagnostics.values()].filter(
-                (d) => d.status === "PRESERVED",
-              ).length,
+              rendered_regions: p.regions.filter(r => r.render.actual_font_size).length,
+              preserved_regions: p.regions.filter(r => !r.restored && !r.render.actual_font_size).length,
             };
+            delete p.metrics.render_region_id;
             return p;
           });
           const garbage = Array.from(
@@ -1002,6 +1020,9 @@ async function handler(req: NextRequest, ctx: Context) {
               mask_exclude: rectangles(input.mask_exclude),
               source_verified: Boolean(input.source_verified),
             };
+            p.metrics = { ...p.metrics, render_region_id:
+              p.status === "rendering" && p.metrics.render_region_id !== r.id
+                ? undefined : r.id };
             p.translated = true;
             p.status = "rendering";
             p.lease = undefined;
@@ -1014,6 +1035,22 @@ async function handler(req: NextRequest, ctx: Context) {
           cancelled: false,
         }));
         return json(region);
+      }
+      if (parts[2] === "retry" && method === "POST" && ["mask", "clean", "render"].includes(parts[3])) {
+        if (page.lease && page.lease.until > Date.now())
+          fail(409, "Pause processing before retrying this region.");
+        if (!page.translated || !region.translation.trim() || region.restored)
+          fail(409, "Save a translation for this bubble before retrying.");
+        await mutate<CloudPage>(page.id, who, p => ({
+          ...p,
+          status: "rendering",
+          lease: undefined,
+          metrics: { ...p.metrics, render_region_id:
+            p.status === "rendering" && p.metrics.render_region_id !== region.id
+              ? undefined : region.id },
+        }), pageDoc.version);
+        await mutate<CloudProject>(project.id, who, p => ({...p, cancelled: false}));
+        return json({ queued: true });
       }
       if (parts[2] === "retranslate" && method === "POST") {
         if (region.render.boundary_crossing || !region.source_text.trim())
@@ -1034,6 +1071,9 @@ async function handler(req: NextRequest, ctx: Context) {
             status: "rendering",
             translated: true,
             lease: undefined,
+            metrics: { ...p.metrics, render_region_id:
+              p.status === "rendering" && p.metrics.render_region_id !== region.id
+                ? undefined : region.id },
           }),
           pageDoc.version,
         );

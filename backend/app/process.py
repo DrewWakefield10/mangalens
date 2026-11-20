@@ -9,6 +9,7 @@ import numpy as np
 from .config import settings
 from .db import DB, Glossary, Job, Page, Project, Region, uid
 from .bubble_ocr import bubble_ocr
+from .bubble_render import BOUNDARY
 from .bubbles import VERSION, approved_bubbles, detect_speech_bubbles, eligible, fingerprint, mark_scan_failed, scan_for
 from .geometry import polygon_mask
 from .rendering import render_page
@@ -17,6 +18,23 @@ from .translation import cached_translate, quality_warnings
 from .diagnostics import record
 
 log = logging.getLogger("mangalens")
+
+
+def previous_render(page, project, regions, selections, job_kind):
+    target_id = page.metrics.get("render_region_id") if job_kind == "render" else None
+    target = next((r for r in regions if r.id == target_id), None)
+    if not target or not page.revision or len(regions) != len(selections):
+        return None, None
+    images = []
+    try:
+        for kind, mode in (("translated", "RGB"), ("clean", "RGB"), ("mask", "L")):
+            with Image.open(asset(project.id, page.id, kind)) as image:
+                if image.size != (page.width, page.height):
+                    return None, None
+                images.append(image.convert(mode))
+    except OSError:
+        return None, None
+    return target, images
 
 
 def run(job_id):
@@ -114,7 +132,7 @@ def run(job_id):
                         r.render = {**r.render, "ocr_retry_count": retry_count, "pending_ocr": False}
                         record(r.render, "DETECTED")
                         if r.render["boundary_crossing"]:
-                            r.warnings = ["Bubble boundary cuts through lettering. Edit Bubble Boundary."]
+                            r.warnings = [BOUNDARY]
                         elif not r.source_text.strip():
                             r.warnings = ["OCR could not read the lettering. Retry OCR or verify a transcription."]
                         ocr_status = (
@@ -175,7 +193,8 @@ def run(job_id):
                     ):
                         r.translation = r.source_text
                         r.render = {**r.render, "source_is_target": True, "translation_error": "",
-                                    "translation_quality": [], "translation_settings": translation_settings}
+                                    "translation_quality": [], "translation_verified": False,
+                                    "translation_settings": translation_settings}
                         continue
                     try:
                         record(r.render, "TRANSLATION_PENDING")
@@ -235,6 +254,7 @@ def run(job_id):
                             "translation_target": project.target_lang,
                             "translation_settings": translation_settings,
                             "translation_error": "",
+                            "translation_verified": False,
                             "state": "translation_completed",
                             "translation_quality": quality_notes,
                             "translation_provider": provider,
@@ -275,21 +295,33 @@ def run(job_id):
                 stage("reviewing_translation")
             # Reevaluate quality on render-only retries too, so improved
             # safeguards apply to already translated pages.
-            regions = [r for r in regions if eligible(page, r)]
-            for r in regions:
+            eligible_regions = [r for r in regions if eligible(page, r)]
+            target, previous = (
+                previous_render(page, project, eligible_regions, selections, job.kind)
+                if len(eligible_regions) == len(regions) else (None, None)
+            )
+            regions = eligible_regions
+            render_regions = [target] if target else regions
+            for r in render_regions:
                 if r.translation and not r.restored:
                     r.render = {
                         **r.render,
-                        "translation_quality": quality_warnings(
+                        "translation_quality": [] if r.render.get("translation_verified") else quality_warnings(
                             r.source_text, r.translation, project.target_lang
                         ),
                     }
             stage("cleaning")
             output, clean, mask, notices = render_page(
                 original,
-                regions,
-                cache_path=asset(project.id, page.id, "bubble-cleanup-cache"),
+                render_regions,
+                cache_path=None if target else asset(project.id, page.id, "bubble-cleanup-cache"),
             )
+            if target:
+                scope = Image.fromarray(polygon_mask((original.height, original.width),
+                                                     target.render["bubble_polygon"]))
+                for saved, updated in zip(previous, (output, clean, mask)):
+                    saved.paste(updated, (0, 0), scope)
+                output, clean, mask = previous
             allowed = np.zeros((original.height, original.width), np.uint8)
             for bubble in selections:
                 allowed |= polygon_mask(allowed.shape, bubble["polygon"])
@@ -310,7 +342,7 @@ def run(job_id):
                 image.save(temporary, format="PNG")
                 temporary.replace(final)
             stage("validating")
-            for r in regions:
+            for r in render_regions:
                 if r.render.get("pending_retry_stage"):
                     options = dict(r.render)
                     options["last_retry_stage"] = options.pop("pending_retry_stage")
@@ -384,7 +416,7 @@ def run(job_id):
             page.revision += 1
             page.error = ""
             page.metrics = {
-                **page.metrics,
+                **{k: v for k, v in page.metrics.items() if k != "render_region_id"},
                 "seconds": round(time.monotonic() - start, 2),
                 "regions": len(regions),
                 "detection_outcome": (

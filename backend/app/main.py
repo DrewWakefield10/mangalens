@@ -537,6 +537,14 @@ def require_approved_region(page, region):
         raise HTTPException(409, "This region is outside the approved speech bubbles. Open the bubble preview.")
 
 
+def queue_region_render(db, page, project, region):
+    page.metrics = {**page.metrics, "render_region_id": region.id}
+    db.add(Job(page_id=page.id, kind="render"))
+    page.status = "queued"
+    page.error = ""
+    project.cancelled = False
+
+
 class Start(BaseModel):
     source_lang: Literal["auto", "ja", "ko", "zh-CN", "zh-TW", "ru", "en"] = "auto"
     target_lang: Literal[
@@ -818,10 +826,7 @@ def retry_region_stage(
         options["mask_revision"] = int(options.get("mask_revision", 0)) + 1
     options["pending_retry_stage"] = stage
     r.render = options
-    db.add(Job(page_id=page.id, kind="render"))
-    page.status = "queued"
-    page.error = ""
-    project.cancelled = False
+    queue_region_render(db, page, project, r)
     db.commit()
     return {"queued": True, "stage": stage, "region_id": r.id}
 
@@ -848,6 +853,7 @@ def edit(
         ):
             raise HTTPException(422, "Region box is outside the page.")
     before = serialize_region(r)
+    wording_changed = body.translation.split() != r.translation.split()
     for box in (
         ([body.source_box] if body.source_box else [])
         + body.mask_include
@@ -860,11 +866,6 @@ def edit(
     r.restored = body.restored
     if body.box:
         r.box = body.box
-    if not (
-        0 <= r.box[0] + body.offset_x <= page.width - r.box[2]
-        and 0 <= r.box[1] + body.offset_y <= page.height - r.box[3]
-    ):
-        raise HTTPException(422, "Text position is outside the page.")
     r.render = {
         **r.render,
         **body.model_dump(
@@ -884,14 +885,15 @@ def edit(
         "translation_settings": fingerprint(p.provider, p.target_lang, p.style, p.quality),
         "translation_error": "",
         "translation_quality": [],
+        "translation_verified": bool(body.translation.strip()) and (
+            wording_changed or r.render.get("translation_verified", False)
+        ),
         "source_is_target": body.language == p.target_lang and body.translation == body.source_text,
         "source_box": body.source_box or r.render.get("source_box", r.box),
     }
     r.warnings = [] if body.source_verified else ["Verify the recognized source text."]
     db.add(Edit(region_id=r.id, before=before, after=serialize_region(r)))
-    db.add(Job(page_id=page.id, kind="render"))
-    page.status = "queued"
-    p.cancelled = False
+    queue_region_render(db, page, p, r)
     db.commit()
     return serialize_region(r)
 
@@ -943,6 +945,7 @@ def retranslate(region_id: str, session=Depends(owner), db=Depends(database)):
         **r.render,
         "manual": True,
         "translation_error": "",
+        "translation_verified": False,
         "translation_target": p.target_lang,
         "translation_provider": provider,
         "translation_cached": cached,
@@ -953,9 +956,7 @@ def retranslate(region_id: str, session=Depends(owner), db=Depends(database)):
         ),
     }
     db.add(Edit(region_id=r.id, before=before, after=serialize_region(r)))
-    db.add(Job(page_id=page.id, kind="render"))
-    page.status = "queued"
-    p.cancelled = False
+    queue_region_render(db, page, p, r)
     db.commit()
     return serialize_region(r)
 

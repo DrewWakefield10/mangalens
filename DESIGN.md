@@ -56,6 +56,11 @@ Canonical actions use `components/ui/button.tsx`. Native labeled checkboxes use 
 
 Bubble review reuses the Radix dialog, native page select, and original page image with a polygon overlay. Solid lavender outlines mark selected bubbles. Dashed amber outlines mark unconfirmed candidates. The adjacent list repeats each state in text and provides keyboard selection. The drawing canvas supports keyboard placement of boundary points.
 
+The editor's inspection select applies an overlay to the selected bubble.
+Lavender shows the boundary, pink shows the proposed lettering mask, green
+shows text placement, and red shows failed pixels. The controls and region
+warning use text labels so they work without the overlay visible.
+
 ## Do's and Don'ts
 
 - Preserve stable region selection when overlays are hidden.

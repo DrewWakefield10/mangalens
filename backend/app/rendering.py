@@ -3,18 +3,25 @@ import cv2
 import numpy as np
 from PIL import Image, ImageDraw, ImageFont, features
 from fontTools.ttLib import TTFont
-from .config import settings
+from .config import ROOT, settings
 from .geometry import polygon_mask, rect_mask, bounds, text_components
+from .bubble_render import BOUNDARY, CLEANUP, TOO_LONG, approved_mask, fit_approved, inset, overlay, reconstruct
 import hashlib
 import json
 import re
 
 
-@lru_cache(maxsize=1)
-def glyphs():
-    if not settings.font_path.exists():
+def typeface(region):
+    if region.render.get("bubble_version") and re.search(r"[\u0e00-\u0e7f]", region.translation):
+        return ROOT / "public/fonts/NotoSansThai.ttf"
+    return settings.font_path
+
+
+@lru_cache(maxsize=4)
+def glyphs(path):
+    if not path.exists():
         raise ValueError("Typesetting font unavailable. Run scripts/setup_models.py.")
-    font = TTFont(settings.font_path)
+    font = TTFont(path)
     result = set().union(*(set(t.cmap) for t in font["cmap"].tables))
     font.close()
     return result
@@ -47,6 +54,14 @@ def usable_area(original, region):
     opts = region.render or {}
     shape = (original.height, original.width)
     polygon = opts.get("bubble_polygon")
+    if polygon and opts.get("bubble_version"):
+        outline = polygon_mask(shape, polygon)
+        _, _, width, height = bounds(outline)
+        padding = max(3, min(12, round(min(width, height) * .06)))
+        area = inset(outline, padding)
+        for box in opts.get("mask_exclude", []):
+            area[rect_mask(shape, box) > 0] = 0
+        return area
     padding = max(3, min(10, round(min(region.box[2:]) * 0.045)))
     area = (
         polygon_mask(shape, polygon, padding)
@@ -72,6 +87,8 @@ def usable_area(original, region):
 
 def fit_text(original, region, allowed):
     """Measure actual glyph pixels; reject overflow, including offsets/long words."""
+    if region.render.get("bubble_version"):
+        return fit_approved(original, region, allowed, typeface(region))
     x, y, w, h = bounds(allowed)
     opts = region.render or {}
     if w < 8 or h < 8:
@@ -114,6 +131,8 @@ def fit_text(original, region, allowed):
 def build_text_mask(array, region):
     """Propose lettering pixels in page coordinates; do not alter artwork."""
     opts = region.render or {}
+    if opts.get("bubble_version") and opts.get("bubble_polygon"):
+        return approved_mask(array, region)
     gray = cv2.cvtColor(array, cv2.COLOR_RGB2GRAY)
     source_box = opts.get("source_box", region.box)
     source = rect_mask(gray.shape, source_box)
@@ -165,6 +184,8 @@ def clean_region(array, region, allowed, mask_data=None):
     mask_data, reason = (mask_data, "") if mask_data is not None else build_text_mask(array, region)
     if mask_data is None:
         return None, None, [reason]
+    if "expected" in mask_data:
+        return reconstruct(array, region, mask_data)
     gray = mask_data["gray"]
     mask = mask_data["mask"].copy()
     base_ink = mask_data["base_ink"]
@@ -235,6 +256,7 @@ def render_page(original, regions, cache_path=None):
     for r in regions:
         opts = r.render or {}
         opts = {**opts, "state": "detected"}
+        opts.pop("layout_debug", None)
         opts["stage_statuses"] = {
             **{k: v for k, v in opts.get("stage_statuses", {}).items()
                if k not in ("mask", "cleaning", "rendering")},
@@ -245,7 +267,11 @@ def render_page(original, regions, cache_path=None):
         opts.pop("cleanup_cache_hit", None)
         r.render = opts
         if opts.get("boundary_crossing"):
-            notices[r.id].append("Bubble boundary cuts through lettering. Edit Bubble Boundary.")
+            notices[r.id].append(BOUNDARY)
+            if opts.get("bubble_polygon"):
+                outline = polygon_mask(array.shape, opts["bubble_polygon"])
+                gray = cv2.cvtColor(array, cv2.COLOR_RGB2GRAY)
+                overlay(r, "rejected", (outline > 0) & (inset(outline, 2) == 0) & (gray < 145))
             continue
         if r.restored:
             opts["state"] = "restored"
@@ -294,7 +320,7 @@ def render_page(original, regions, cache_path=None):
             notices[r.id].extend(opts["translation_quality"])
             continue
         try:
-            available_glyphs = glyphs()
+            available_glyphs = glyphs(typeface(r))
         except (OSError, ValueError):
             notices[r.id].append("Typesetting font is unavailable. Original bubble preserved.")
             continue
@@ -303,14 +329,15 @@ def render_page(original, regions, cache_path=None):
             continue
         try:
             area = usable_area(original, r)
+            if opts.get("bubble_version"):
+                overlay(r, "placement", area)
             layout = fit_text(original, r, area)
         except (OSError, ValueError, cv2.error):
             notices[r.id].append("Typesetting could not validate this bubble. Original preserved.")
             continue
         if not layout:
-            notices[r.id].append(
-                "Translation does not fit inside the safe region at 12px; original preserved."
-            )
+            notices[r.id].append(TOO_LONG if opts.get("bubble_version") else
+                                 "Translation does not fit inside the safe region at 12px; original preserved.")
             continue
         if np.any((area > 0) & (occupied > 0)):
             notices[r.id].append(
@@ -333,9 +360,13 @@ def render_page(original, regions, cache_path=None):
                 proposal, reason = build_text_mask(array, r)
             except (ValueError, cv2.error):
                 proposal, reason = None, "The lettering mask could not be verified. Original preserved."
+            if r.render.get("layout_debug") is not None:
+                opts["layout_debug"] = r.render["layout_debug"]
             if proposal is None:
                 opts.update(mask_status="failed", mask_candidate_pixels=0, mask_failure_reason=reason)
                 record(opts, "MASK_FAILED", reason)
+                if reason == BOUNDARY:
+                    notices[r.id] = [BOUNDARY]
             else:
                 if r.id in layouts:
                     candidate_masks[r.id] = proposal
@@ -347,7 +378,7 @@ def render_page(original, regions, cache_path=None):
     # Cleanup excludes translation and typography. Per-region signatures let a
     # mask retry reuse every other successfully cleaned region.
     original_digest = hashlib.sha256(array.tobytes()).hexdigest()
-    cache_version = "cleanup-v7"
+    cache_version = "cleanup-v8"
     region_ids = {r.id: index + 1 for index, r in enumerate(regions)}
     signatures = {}
     for r in regions:
@@ -374,13 +405,12 @@ def render_page(original, regions, cache_path=None):
             if (metadata.get("version") == cache_version
                     and metadata.get("original_digest") == original_digest
                     and metadata.get("region_ids") == region_ids):
-                clean_array = np.array(
-                    Image.open(cache_path.with_suffix(".clean.png")).convert("RGB")
-                )
-                mask = np.array(
-                    Image.open(cache_path.with_suffix(".mask.png")).convert("L")
-                )
-                owners = np.array(Image.open(cache_path.with_suffix(".owners.png")))
+                with Image.open(cache_path.with_suffix(".clean.png")) as cached:
+                    clean_array = np.array(cached.convert("RGB"))
+                with Image.open(cache_path.with_suffix(".mask.png")) as cached:
+                    mask = np.array(cached.convert("L"))
+                with Image.open(cache_path.with_suffix(".owners.png")) as cached:
+                    owners = np.array(cached)
                 loaded = (
                     clean_array.shape == array.shape
                     and mask.shape == array.shape[:2]
@@ -443,7 +473,7 @@ def render_page(original, regions, cache_path=None):
             successful.append(r.id)
     output = Image.fromarray(clean_array)
     for r in regions:
-        notices[r.id] += cleanup_notices.get(r.id, [])
+        notices[r.id] = list(dict.fromkeys(notices[r.id] + cleanup_notices.get(r.id, [])))
         opts = r.render or {}
         if r.id in successful:
             layer, size = layouts[r.id]
@@ -456,7 +486,9 @@ def render_page(original, regions, cache_path=None):
             )
             if np.any(leftover):
                 # Restore this region's cleanup as well as omitting its overlay.
-                reason = "Lettering or artwork remains under the proposed text; original preserved."
+                reason = CLEANUP if opts.get("bubble_version") else "Lettering or artwork remains under the proposed text; original preserved."
+                if opts.get("bubble_version"):
+                    overlay(r, "rejected", leftover)
                 notices[r.id].append(reason)
                 cleanup_notices.setdefault(r.id, []).append(reason)
                 restore = owners == region_ids[r.id]
@@ -484,7 +516,7 @@ def render_page(original, regions, cache_path=None):
         elif not r.restored:
             opts["state"] = "needs_review"
             reason = notices[r.id][0] if notices[r.id] else "Region was not rendered"
-            if opts.get("boundary_crossing"):
+            if opts.get("boundary_crossing") or reason == BOUNDARY:
                 record(opts, "NEEDS_MANUAL_REVIEW", reason)
             elif hasattr(r, "source_text") and not r.source_text.strip():
                 record(opts, "OCR_FAILED", reason)

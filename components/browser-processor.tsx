@@ -62,6 +62,7 @@ export default function BrowserProcessor() {
                 "The original page could not be loaded. Resume the chapter to retry.",
               );
             const bitmap = await createImageBitmap(await response.blob());
+            const savedImages: ImageBitmap[] = [];
             try {
               if (!page.translated) {
                 for (let index = 0; index < page.tile_count; index++) {
@@ -73,17 +74,39 @@ export default function BrowserProcessor() {
                   });
                 }
               }
-              setMessage("Translating " + page.name + "… Keep this tab open.");
-              const { regions } = await api<{ regions: Region[] }>(
-                "/pages/" + page.id + "/translate",
-                {
-                  method: "POST",
-                  body: JSON.stringify({ token }),
-                  signal: controller.signal,
-                },
-              );
+              let regions = page.regions;
+              if (!page.translated) {
+                setMessage("Translating " + page.name + "… Keep this tab open.");
+                ({ regions } = await api<{ regions: Region[] }>(
+                  "/pages/" + page.id + "/translate",
+                  { method: "POST", body: JSON.stringify({ token }), signal: controller.signal },
+                ));
+              }
               setMessage("Rendering " + page.name + "… Keep this tab open.");
-              const result = await renderPage(bitmap, page, regions);
+              const target = page.translated && page.revision && regions.length === page.tile_count
+                ? regions.find(region => region.id === page.metrics.render_region_id)
+                : undefined;
+              let previous: Record<"translated" | "clean" | "mask", ImageBitmap> | undefined;
+              if (target) {
+                try {
+                  for (const kind of ["translated", "clean", "mask"]) {
+                    const saved = await fetch("/api/pages/" + page.id + "/image/" + kind,
+                      { signal: controller.signal });
+                    if (!saved.ok) break;
+                    const image = await createImageBitmap(await saved.blob());
+                    if (image.width !== page.width || image.height !== page.height) {
+                      image.close();
+                      break;
+                    }
+                    savedImages.push(image);
+                  }
+                } catch (error) {
+                  if (controller.signal.aborted) throw error;
+                }
+                const [translated, clean, mask] = savedImages;
+                if (mask) previous = { translated, clean, mask };
+              }
+              const result = await renderPage(bitmap, page, previous && target ? [target] : regions, previous);
               if (stopped)
                 throw new DOMException("Processing paused", "AbortError");
               const urls = await api<Record<string, string>>(
@@ -121,6 +144,7 @@ export default function BrowserProcessor() {
               await client.invalidateQueries({ queryKey: ["projects"] });
             } finally {
               bitmap.close();
+              savedImages.forEach(image => image.close());
             }
           } catch (cause) {
             if (cause instanceof Error && cause.name === "AbortError") return;

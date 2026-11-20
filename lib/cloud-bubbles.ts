@@ -73,6 +73,7 @@ export function configureBubbles(
     bubble_order: selections.map((bubble) => bubble.id),
     layout_version: 3,
   };
+  delete page.metrics.render_region_id;
   page.tiles_done = selections.flatMap((bubble, index) =>
     page.regions.some((r) => r.render.bubble_id === bubble.id) ? [index] : [],
   );

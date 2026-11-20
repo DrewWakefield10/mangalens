@@ -7,6 +7,7 @@ RUN pip install --no-cache-dir -r backend/requirements.txt
 COPY backend /app/backend
 COPY scripts /app/scripts
 COPY assets /app/assets
+COPY public/fonts/NotoSansThai.ttf public/fonts/NotoSansThai-OFL.txt /app/public/fonts/
 RUN useradd --uid 10001 --create-home mangalens && mkdir -p /app/data /app/models && chown -R mangalens:mangalens /app
 USER mangalens
 WORKDIR /app/backend

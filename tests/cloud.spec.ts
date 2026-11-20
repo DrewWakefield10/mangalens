@@ -92,12 +92,21 @@ test("browser import, rendering, private ownership, editor save, exports and del
   await expect(
     page.getByRole("textbox", { name: "Recognized source", exact: true }),
   ).toBeVisible({ timeout: 20000 });
+  const usageCount = async () => {
+    const state = await page.request.get("http://127.0.0.1:4401/fixture/state");
+    return (await state.json()).ml_usage.length;
+  };
+  const usageBefore = await usageCount();
+  await page.getByLabel("Inspection overlay").selectOption("boundary");
+  await expect(page.getByRole("img", { name: "Bubble boundary" })).toBeVisible();
+  await page.getByRole("button", { name: "Edit Translation", exact: true }).click();
+  await expect(page.getByRole("textbox", { name: "Translation", exact: true })).toBeFocused();
   await page
     .getByRole("textbox", { name: "Translation", exact: true })
-    .fill("The next adventure");
-  await page.getByRole("button", { name: "Save changes", exact: true }).click();
+    .fill("The next\nadventure");
+  await page.getByRole("button", { name: "Auto-Fit Text", exact: true }).click();
   await expect(
-    page.getByText("Saved. This page is being rendered again.", {
+    page.getByText("Saved. This bubble is being rendered again.", {
       exact: true,
     }),
   ).toBeVisible();
@@ -105,6 +114,10 @@ test("browser import, rendering, private ownership, editor save, exports and del
   await expect(
     page.getByText("Pages are ready for review", { exact: true }),
   ).toBeVisible({ timeout: 60000 });
+  expect(await usageCount()).toBe(usageBefore);
+  const rerendered = await (await page.request.get("/api/pages/" + pageId + "/regions")).json();
+  expect(rerendered[0].translation).toBe("The next\nadventure");
+  expect(rerendered[0].render.layout_debug.placement.length).toBeGreaterThan(0);
   await page.setViewportSize({ width: 390, height: 844 });
   await page.screenshot({
     path: "test-results/cloud-mobile.png",
@@ -441,4 +454,112 @@ test("vertical balloon rendering removes old lettering and preserves the outline
   expect(result.diagnostics[0].status).toBe("RENDERED_NEEDS_REVIEW");
   expect(result.diagnostics[0].mask_pixels).toBeGreaterThan(1000);
   expect(result.diagnostics[0].font_size).toBeGreaterThanOrEqual(12);
+});
+
+test("approved jagged bubbles use separate cleanup and fit checks and isolate a layout edit", async ({ page }) => {
+  const { build } = await import("esbuild");
+  const bundle = await build({
+    stdin: {
+      contents: 'export {renderPage} from "./lib/browser-render"; export {polygonRows} from "./lib/bubble-geometry";',
+      resolveDir: process.cwd(),
+    },
+    bundle: true, write: false, format: "iife", globalName: "MangaLensRenderTest",
+    platform: "browser", target: "es2020",
+  });
+  await page.goto("/");
+  await page.addScriptTag({ content: bundle.outputFiles[0].text });
+  const result = await page.evaluate(async () => {
+    type Point = import("../lib/bubble-geometry").Point;
+    type Region = import("../lib/api").Region;
+    const { renderPage, polygonRows } = (window as unknown as {
+      MangaLensRenderTest: typeof import("../lib/browser-render") & typeof import("../lib/bubble-geometry");
+    }).MangaLensRenderTest;
+    const canvas = document.createElement("canvas");
+    const width = canvas.width = 580, height = canvas.height = 330;
+    const ctx = canvas.getContext("2d", { willReadFrequently: true })!;
+    ctx.fillStyle = "#a0a1a2";
+    ctx.fillRect(0, 0, width, height);
+    const shapes: Point[][] = [
+      [[36,45],[176,45],[225,80],[232,201],[181,223],[84,221],[65,246],[60,219],[36,197]],
+      [[282,45],[425,45],[425,217],[282,217]],
+    ];
+    for (const points of shapes) {
+      ctx.beginPath();
+      for (const [x,y] of points) ctx.lineTo(x,y);
+      ctx.closePath();
+      ctx.fillStyle = "white";
+      ctx.strokeStyle = "#222";
+      ctx.lineWidth = 2;
+      ctx.fill();
+      ctx.stroke();
+    }
+    ctx.fillStyle = "#262626";
+    ctx.font = "24px sans-serif";
+    ctx.fillText("じゃ！", 43, 122);
+    ctx.fillText("またね", 327, 125);
+    ctx.fillStyle = "#d00";
+    ctx.fillText("OUTSIDE", 460, 145);
+    const regions: Region[] = shapes.map((shape, index) => {
+      const source = index === 0 ? [42, 99, 77, 31] : [325, 102, 79, 29];
+      return {
+        id: String(index), page_id: "fixture", box: source, language: "ja",
+        orientation: "horizontal", source_text: index === 0 ? "じゃ！" : "またね",
+        confidence: 1, translation: index === 0 ? "Ça y est!\nSee you tomorrow, then." : "W".repeat(120),
+        restored: false, warnings: [], kind: "speech_bubble",
+        render: { bubble_polygon: shape, source_box: source, source_verified: true },
+      };
+    });
+    const page = { width, height, regions } as import("../lib/cloud-types").CloudPage;
+    const original = ctx.getImageData(0, 0, width, height).data;
+    const bitmap = await createImageBitmap(canvas);
+    const first = await renderPage(bitmap, page, regions);
+    const saved = {
+      translated: await createImageBitmap(first.translated),
+      clean: await createImageBitmap(first.clean),
+      mask: await createImageBitmap(first.mask),
+    };
+    const read = (image: ImageBitmap) => {
+      ctx.drawImage(image, 0, 0);
+      return ctx.getImageData(0, 0, width, height).data;
+    };
+    const clean = read(saved.clean), translated = read(saved.translated);
+    const scope = polygonRows(shapes[0]);
+    const placement = first.diagnostics[0].layout_debug?.placement ?? [];
+    let unchangedOutside = true, sourceRemoved = 0, placed = 0, clipped = false;
+    for (let y = 0; y < height; y++)
+      for (let x = 0; x < width; x++) {
+        const i = (y * width + x) * 4;
+        if (!scope.contains(x, y) && (clean[i] !== original[i] || translated[i] !== original[i]))
+          unchangedOutside = false;
+        if (x >= 42 && x < 119 && y >= 99 && y < 130 && original[i] < 255 && clean[i] === 255)
+          sourceRemoved++;
+        if (translated[i] === clean[i]) continue;
+        placed++;
+        if (!placement.some(([left, row, w]) => y === row && x >= left && x < left + w)) clipped = true;
+      }
+    regions[1].translation = "พรุ่งนี้เราจะกลับมาเจอกันที่ห้องเรียน!";
+    const edited = await renderPage(bitmap, page, [regions[1]], saved);
+    const updatedImage = await createImageBitmap(edited.translated);
+    const updated = read(updatedImage);
+    const other = polygonRows(shapes[1]);
+    let preservedPrevious = true, editedPixels = 0;
+    for (let i = 0; i < updated.length; i += 4)
+      if (updated[i] !== translated[i]) {
+        const index = i / 4;
+        if (!other.contains(index % width, Math.floor(index / width))) preservedPrevious = false;
+        else editedPixels++;
+      }
+    for (const image of [bitmap, updatedImage, ...Object.values(saved)]) image.close();
+    return { unchangedOutside, sourceRemoved, placed, clipped, preservedPrevious, editedPixels,
+      diagnostics: first.diagnostics, edited: edited.diagnostics };
+  });
+  expect(result.unchangedOutside).toBe(true);
+  expect(result.sourceRemoved).toBeGreaterThan(80);
+  expect(result.placed).toBeGreaterThan(80);
+  expect(result.clipped).toBe(false);
+  expect(result.diagnostics[0].font_size).toBeGreaterThanOrEqual(12);
+  expect(result.diagnostics[1].reason).toBe("Translation is too long to fit at a readable size");
+  expect(result.preservedPrevious).toBe(true);
+  expect(result.editedPixels).toBeGreaterThan(80);
+  expect(result.edited.map(({ id }) => id)).toEqual(["1"]);
 });

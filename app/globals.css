@@ -1379,6 +1379,22 @@ footer a {
   height: auto;
   display: block;
 }
+.editor-inspection {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  pointer-events: none;
+  z-index: 1;
+}
+.editor-inspection.boundary polygon {
+  fill: #b6a0ff25;
+  stroke: #8757f0;
+  stroke-width: 2;
+}
+.editor-inspection.source { fill: #bc4af0cc; }
+.editor-inspection.placement { fill: #31b78466; }
+.editor-inspection.rejected { fill: #fa4055ed; }
 .region-box {
   position: absolute;
   border: 2px solid #8c67f088;

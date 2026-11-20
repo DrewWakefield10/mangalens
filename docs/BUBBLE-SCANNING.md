@@ -42,3 +42,19 @@ Reproduce local results with the saved manga samples:
 The native pipeline changes are in `backend/app/bubbles.py`, `bubble_ocr.py`, `process.py`, `main.py` and `rendering.py`. The hosted changes are in `lib/cloud-bubbles.ts`, `lib/bubble-geometry.ts`, the Next.js API route and the browser processor and renderer. The shared `components/bubble-preview.tsx` appears in import, chapter and editor flows.
 
 The Vercel and Supabase mode uses its existing gateway and schema. A deployment configured to call the native API needs the updated Python API and worker as well as the Next.js release. Restart the native launcher to pick up both.
+
+## Retry an existing bubble
+
+Open the editor from an existing chapter and select the bubble. In **Inspection overlay**, choose its boundary, source lettering mask, placement area or failed pixels. Compare them with **Original**, **Clean** and **Translated**. The source mask shows the proposed cleanup. The **Mask** view shows the pixels actually cleaned in the published image.
+
+| Warning | Editor action |
+| --- | --- |
+| Source lettering crosses the bubble boundary | **Edit Bubble Boundary** traces the selection on the original. |
+| Original lettering could not be fully removed | **Retry Cleanup** tries again using the saved source text and translation. Use the mask controls if you need to protect artwork or identify additional lettering. |
+| Translation is too long to fit at a readable size | **Auto-Fit Text** resets size and placement constraints. **Edit Translation** lets you add line breaks or shorten the full text. |
+
+Layout edits and cleanup retries reuse the existing OCR and translation and replace only the selected bubble in the saved output. If earlier output images are missing, MangaLens rebuilds the page from its saved regions. A failed replacement keeps the original lettering. Regions with unresolved OCR, uncertain translations, or source ink touching the outline still need review.
+
+The earlier combined warning came from testing a single selected text layout for glyph overflow and leftover original ink together. The new checks validate source cleanup independently and try smaller fonts and different wraps when the first layout fails. Sizes are measured using the actual rendering font. Thai uses the bundled [Noto Sans Thai](https://github.com/notofonts/thai).
+
+The cleanup and fitting regression reused saved DeepL translations on manga pages 001 and 003 and the CC0 Japanese fixture. It rendered 2 of 4, 4 of 8, and 1 of 1 approved bubbles respectively. The six remaining bubbles were preserved for recognition or association review, a short interjection, or a boundary crossing. All three comparisons passed the dimension, cleanup-mask, glyph-placement and exterior-pixel checks. The original associated with the eight combined warnings could not be identified in the saved data. The regression fixtures reproduce both failure types and verify that a failed bubble leaves its neighbors untouched.

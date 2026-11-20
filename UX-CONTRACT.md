@@ -41,9 +41,16 @@ The renderer applies only validated glyphs and cleanup. The API checks decoded
 pixels outside approved polygons before accepting browser-rendered outputs.
 Vertical CJK dialogue uses provider reading order
 when available, with geometric right-to-left column ordering as a fallback.
-English wraps as words within balloon contours. Source lettering and placement
-boxes remain separate. Cleanup includes isolated lettering and small annotations
-inside the balloon while retaining its outline and protected artwork.
+The editor fits actual glyphs to the padded bubble interior at 12px or larger.
+It preserves manual line breaks and uses the full confirmed shape for automatic
+placement. Cleanup can reach closer to the outline. The inspector overlays the
+boundary, proposed source mask, placement area and failed pixels. A replacement
+appears only when its cleanup and translation both pass validation.
+
+Auto-Fit Text resets the layout controls for the selected bubble. A saved
+layout edit or Retry Cleanup reuses the bubble's OCR and translation. The
+editor offers Edit Bubble Boundary when source ink crosses the selection and
+Edit Translation when the full text needs a shorter wording.
 
 The editor's Rebuild page translation action reuses completed OCR. Retry page OCR
 explicitly recognizes the page again. Both preserve saved manual corrections;

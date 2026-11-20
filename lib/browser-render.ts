@@ -3,15 +3,16 @@ import { speechMap, bubbleInk } from "./page-layout";
 import type { Region } from "./api";
 import type { CloudPage } from "./cloud-types";
 import { blobOf, canvasOf } from "./browser-pages";
+import { renderApprovedBubble } from "./bubble-render";
+import { TOO_LONG, type LayoutDebug } from "./render-feedback";
 let font: Promise<void> | undefined;
 function loadFont() {
   return (font ||= (async () => {
-    const face = new FontFace(
-      "MangaLensCJK",
-      "url(/fonts/NotoSansCJKjp-Regular.otf)",
-    );
-    const loaded = await face.load();
-    document.fonts.add(loaded);
+    const faces = await Promise.all([
+      new FontFace("MangaLensCJK", "url(/fonts/NotoSansCJKjp-Regular.otf)").load(),
+      new FontFace("MangaLensThai", "url(/fonts/NotoSansThai.ttf)").load(),
+    ]);
+    faces.forEach(face => document.fonts.add(face));
     await document.fonts.ready;
   })().catch((error) => {
     font = undefined;
@@ -64,6 +65,7 @@ export type RenderDiagnostic = {
   reason: string;
   mask_pixels: number;
   font_size: number;
+  layout_debug?: LayoutDebug;
 };
 type TextLine = { text: string; x: number; y: number; width: number };
 function overlaps(a: number[], b: number[]) {
@@ -195,6 +197,7 @@ export async function renderPage(
   bitmap: ImageBitmap,
   page: CloudPage,
   regions: Region[],
+  previous?: Record<"translated" | "clean" | "mask", ImageBitmap>,
 ) {
   await loadFont();
   const width = bitmap.width,
@@ -208,7 +211,7 @@ export async function renderPage(
   cleanCtx.drawImage(bitmap, 0, 0);
   const original = cleanCtx.getImageData(0, 0, width, height),
     pixels = new Uint8ClampedArray(original.data),
-    map = speechMap(original);
+    map = regions.some(region => !region.render.bubble_polygon) ? speechMap(original) : null;
   const maskPixels = new Uint8Array(width * height),
     warnings: string[] = [],
     diagnostics: RenderDiagnostic[] = [];
@@ -223,6 +226,7 @@ export async function renderPage(
     region: Region;
     layout: { size: number; lines: TextLine[] };
   }[] = [];
+  const approvedLayers: { glyphs: HTMLCanvasElement; x: number; y: number }[] = [];
   for (const [index, region] of regions.entries()) {
     const diagnostic: RenderDiagnostic = {
       id: region.id,
@@ -234,18 +238,37 @@ export async function renderPage(
     diagnostics.push(diagnostic);
     const preserve = (reason: string) => {
       diagnostic.reason = reason;
-      warnings.push("Region " + (index + 1) + ": " + reason);
+      const savedIndex = page.regions?.findIndex(item => item.id === region.id) ?? -1;
+      warnings.push("Region " + ((savedIndex < 0 ? index : savedIndex) + 1) + ": " + reason);
     };
     if (region.restored) {
       diagnostic.status = "RESTORED";
+      continue;
+    }
+    if (region.render.bubble_polygon) {
+      const result = renderApprovedBubble(original, region);
+      diagnostic.layout_debug = result.debug;
+      if (!result.glyphs) {
+        preserve(result.reason);
+        continue;
+      }
+      const { crop, clean, mask, glyphs, x, y, size } = result;
+      for (let i = 0; i < mask.length; i++) {
+        if (!mask[i]) continue;
+        const index = (crop.y + Math.floor(i / crop.width)) * width + crop.x + i % crop.width;
+        pixels.set(clean.subarray(i * 4, i * 4 + 4), index * 4);
+        maskPixels[index] = 1;
+        diagnostic.mask_pixels++;
+      }
+      diagnostic.font_size = size;
+      diagnostic.status = "RENDERED_NEEDS_REVIEW";
+      approvedLayers.push({ glyphs, x, y });
       continue;
     }
     if (region.render.boundary_crossing) {
       preserve("Lettering crosses the selection. Edit Bubble Boundary.");
       continue;
     }
-    const boundary = region.render.bubble_polygon as Point[] | undefined;
-    const approved = boundary ? polygonRows(boundary) : undefined;
     if (!region.translation.trim()) {
       preserve(
         String(region.render.failure_reason || "No translated text was available. Original lettering was preserved."),
@@ -268,7 +291,7 @@ export async function renderPage(
       clip = (region.render.cleanup_box as number[]) || bubble;
     const ink: number[] = [];
     if (bubble && !includes.length) {
-      for (const pixel of bubbleInk(original, map, bubble, clip))
+      for (const pixel of bubbleInk(original, map!, bubble, clip))
         ink.push(pixel);
     } else {
       const [x, y, w, h] = source,
@@ -334,30 +357,15 @@ export async function renderPage(
           }
       }
     }
-    if (approved && !ink.length && !includes.length) {
-      const [x, y, w, h] = source;
-      let light = 0;
-      for (let yy = y; yy < y + h; yy++)
-        for (let xx = x; xx < x + w; xx++) {
-          if (!approved.contains(xx, yy)) continue;
-          const p = (yy * width + xx) * 4;
-          if (Math.min(original.data[p], original.data[p + 1], original.data[p + 2]) < 210)
-            ink.push(yy * width + xx);
-          else light++;
-        }
-      if (light < ink.length * 3) ink.length = 0;
-    }
     if (!ink.length) {
       preserve(
         "a safe lettering mask could not be found; original artwork was preserved.",
       );
       continue;
     }
-    const layout = fitText(target, region, map);
+    const layout = fitText(target, region, map!);
     if (!layout) {
-      preserve(
-        "translation could not fit at a readable size; enlarge its placement box.",
-      );
+      preserve(TOO_LONG);
       continue;
     }
     if (
@@ -394,8 +402,6 @@ export async function renderPage(
           )
             continue;
           if (clip && !inside(xx, yy, clip)) continue;
-          if (approved && (!approved.contains(xx - 1, yy) || !approved.contains(xx + 1, yy) ||
-            !approved.contains(xx, yy - 1) || !approved.contains(xx, yy + 1))) continue;
           marked.add(yy * width + xx);
         }
     }
@@ -403,36 +409,10 @@ export async function renderPage(
       preserve("No validated lettering pixels are inside this bubble.");
       continue;
     }
-    if (approved) {
-      const padding = layout.size * 2 + 6;
-      const x = approved.x - padding, y = approved.y - padding;
-      const layer = canvasOf(approved.width + 2 * padding, approved.height + 2 * padding);
-      const ctx = layer.getContext("2d", { willReadFrequently: true })!;
-      ctx.translate(-x, -y);
-      paintText(ctx, region, layout);
-      const rgba = ctx.getImageData(0, 0, layer.width, layer.height).data;
-      let glyphs = 0;
-      let invalid = false;
-      for (let i = 3; i < rgba.length; i += 4) {
-        if (!rgba[i]) continue;
-        glyphs++;
-        const index = (i - 3) / 4;
-        const px = x + index % layer.width, py = y + Math.floor(index / layer.width);
-        const originalIndex = py * width + px;
-        if (!approved.contains(px - 2, py) || !approved.contains(px + 2, py)
-            || !approved.contains(px, py - 2) || !approved.contains(px, py + 2)
-            || (!marked.has(originalIndex) && original.data[originalIndex * 4] < 110)) {
-          invalid = true;
-          break;
-        }
-      }
-      layer.width = layer.height = 0;
-      if (!glyphs || invalid) {
-        preserve("Translated lettering or original ink crosses the usable area. Adjust the layout.");
-        continue;
-      }
+    for (const p of marked) {
+      maskPixels[p] = 1;
+      pixels.fill(255, p * 4, p * 4 + 4);
     }
-    for (const p of marked) maskPixels[p] = 1;
     diagnostic.status = "RENDERED_NEEDS_REVIEW";
     diagnostic.mask_pixels = marked.size;
     diagnostic.font_size = layout.size;
@@ -443,7 +423,6 @@ export async function renderPage(
   for (let i = 0; i < maskPixels.length; i++) {
     const p = i * 4;
     if (maskPixels[i]) {
-      pixels[p] = pixels[p + 1] = pixels[p + 2] = pixels[p + 3] = 255;
       maskData.data[p] = maskData.data[p + 1] = maskData.data[p + 2] = 255;
     }
     maskData.data[p + 3] = 255;
@@ -452,6 +431,30 @@ export async function renderPage(
   maskCtx.putImageData(maskData, 0, 0);
   target.drawImage(clean, 0, 0);
   for (const { region, layout } of drawable) paintText(target, region, layout);
+  for (const { glyphs, x, y } of approvedLayers) {
+    target.drawImage(glyphs, x, y);
+    glyphs.width = glyphs.height = 0;
+  }
+  if (previous && regions.length === 1) {
+    const scope = polygonRows(regions[0].render.bubble_polygon as Point[]);
+    const base = canvasOf(width, height);
+    const ctx = base.getContext("2d", { willReadFrequently: true })!;
+    for (const [kind, context] of [["translated", target], ["clean", cleanCtx], ["mask", maskCtx]] as const) {
+      ctx.clearRect(0, 0, width, height);
+      ctx.drawImage(previous[kind], 0, 0);
+      const saved = ctx.getImageData(0, 0, width, height);
+      const current = context.getImageData(scope.x, scope.y, scope.width, scope.height);
+      for (const [row, cuts] of scope.rows.entries()) {
+        for (let i = 0; i < cuts.length; i += 2) {
+          const from = (row * scope.width + cuts[i] - scope.x) * 4;
+          const to = ((scope.y + row) * width + cuts[i]) * 4;
+          saved.data.set(current.data.subarray(from, from + (cuts[i + 1] - cuts[i]) * 4), to);
+        }
+      }
+      context.putImageData(saved, 0, 0);
+    }
+    base.width = base.height = 0;
+  }
   const result = {
     translated: await blobOf(translated),
     clean: await blobOf(clean),

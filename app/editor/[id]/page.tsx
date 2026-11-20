@@ -14,6 +14,17 @@ import { useProject } from "@/components/project-hooks";
 import { api, Region, ready, languages } from "@/lib/api";
 import { BubblePreviewDialog } from "@/components/bubble-preview";
 import { Button } from "@/components/ui/button";
+import { BOUNDARY, CLEANUP, TOO_LONG, type LayoutDebug } from "@/lib/render-feedback";
+import type { Point } from "@/lib/bubble-geometry";
+
+const inspectionViews = {
+  off: "Off",
+  boundary: "Bubble boundary",
+  source: "Source lettering mask",
+  placement: "Placement area",
+  rejected: "Failed pixels",
+} as const;
+type InspectionView = keyof typeof inspectionViews;
 type Draft = {
   page_version: number;
   source_text: string;
@@ -37,7 +48,7 @@ function draftOf(r: Region): Draft {
     source_text: r.source_text,
     translation: r.translation,
     language: r.language,
-    font_size: Number(r.render.font_size) || 42,
+    font_size: Number(r.render.font_size) || 100,
     align: String(r.render.align || "center"),
     offset_x: Number(r.render.offset_x) || 0,
     offset_y: Number(r.render.offset_y) || 0,
@@ -81,6 +92,8 @@ export default function Editor({
   const [preview, setPreview] = useState(false);
   const [view, setView] = useState("translated");
   const [showRegions, setShowRegions] = useState(true);
+  const [inspection, setInspection] = useState<InspectionView>("off");
+  const translationField = useRef<HTMLTextAreaElement>(null);
   const [glossaryText, setGlossaryText] = useState("");
   const [drawMode, setDrawMode] = useState<
     "" | "source" | "include" | "exclude"
@@ -110,6 +123,13 @@ export default function Editor({
       query?.queryKey[1] === page?.id ? previous : undefined,
   });
   const region = regions?.find((r) => r.id === selected);
+  const boundary = region?.render.bubble_polygon as Point[] | undefined;
+  const layoutDebug = region?.render.layout_debug as LayoutDebug | undefined;
+  const inspectionRuns = inspection === "source" || inspection === "placement" || inspection === "rejected"
+    ? layoutDebug?.[inspection] : undefined;
+  const partialInspection = (inspection === "source" || inspection === "placement" || inspection === "rejected")
+    && layoutDebug?.[`${inspection}_truncated`];
+  const reason = String(region?.render.failure_reason || "");
   useEffect(() => {
     if (regions?.length && !regions.some((r) => r.id === selected))
       setSelected(regions[0].id);
@@ -183,17 +203,17 @@ export default function Editor({
     setRedo([]);
     setDraft({ ...draft, ...patch });
   }
-  async function save() {
-    if (!draft || !region) return;
+  async function save(data: Draft | null) {
+    if (!data || !region) return;
     setBusy(true);
     setError("");
     try {
       await api("/regions/" + region.id, {
         method: "PUT",
-        body: JSON.stringify(draft),
+        body: JSON.stringify(data),
       });
       dirty.current = false;
-      setNotice("Saved. This page is being rendered again.");
+      setNotice("Saved. This bubble is being rendered again.");
       client.invalidateQueries({ queryKey: ["project", id] });
     } catch (e) {
       setError((e as Error).message);
@@ -295,6 +315,14 @@ export default function Editor({
           Show region boxes
         </label>
         <label>
+          Inspection overlay{" "}
+          <select value={inspection} onChange={e => setInspection(e.target.value as InspectionView)}>
+            {Object.entries(inspectionViews).map(([value, label]) => (
+              <option key={value} value={value}>{label}</option>
+            ))}
+          </select>
+        </label>
+        <label>
           OCR language{" "}
           <select
             aria-label="Recovery source language"
@@ -364,6 +392,13 @@ export default function Editor({
           actually removed. Save mask edits before previewing them.
         </p>
       )}
+      {inspection !== "off" && (inspection === "boundary" ? !boundary : !inspectionRuns?.length) && (
+        <p className="hint" role="status">
+          {inspection === "rejected" ? "No failed pixels were recorded for this bubble." :
+            "This overlay is unavailable for the selected bubble."}
+        </p>
+      )}
+      {partialInspection && <p className="hint">This overlay shows a portion of the recorded pixels.</p>}
       {page && (
         <div className="editor-layout">
           <div
@@ -419,6 +454,17 @@ export default function Editor({
               alt={"Page " + (index + 1) + " " + view}
               draggable={false}
             />
+            {inspection !== "off" && boundary && (
+              <svg className={`editor-inspection ${inspection}`} viewBox={`0 0 ${page.width} ${page.height}`}
+                aria-label={inspectionViews[inspection]} role="img">
+                {inspection === "boundary" ? (
+                  <polygon points={boundary.map(point => point.join(",")).join(" ")}
+                    vectorEffect="non-scaling-stroke" />
+                ) : (
+                  <path d={inspectionRuns?.map(([x, y, w]) => `M${x} ${y}h${w}v1h${-w}Z`).join(" ")} />
+                )}
+              </svg>
+            )}
             {showRegions &&
               regions?.map((r, i) => (
                 <button
@@ -633,7 +679,9 @@ export default function Editor({
                 >
                   Retry region OCR
                 </Button>
-                {Boolean(region.render.boundary_crossing) && (
+                {[BOUNDARY, CLEANUP, TOO_LONG].includes(reason) &&
+                  <p className="note" role="status">{reason}</p>}
+                {(Boolean(region.render.boundary_crossing) || reason === BOUNDARY) && (
                   <Button variant="outline" disabled={p.active || busy} onClick={() => setPreview(true)}>
                     Edit Bubble Boundary
                   </Button>
@@ -643,14 +691,7 @@ export default function Editor({
                     <Button
                       key={stage}
                       variant="outline"
-                      disabled={
-                        busy || p.active || p.execution_mode === "browser"
-                      }
-                      title={
-                        p.execution_mode === "browser"
-                          ? "Save the region to rerender its page."
-                          : undefined
-                      }
+                      disabled={busy || p.active || dirty.current || !region.translation || region.restored}
                       onClick={() =>
                         recover(
                           "/regions/" + region.id + "/retry/" + stage,
@@ -662,10 +703,21 @@ export default function Editor({
                       {stage === "mask"
                         ? "Regenerate mask"
                         : stage === "clean"
-                          ? "Retry cleanup"
+                          ? "Retry Cleanup"
                           : "Retry rendering"}
                     </Button>
                   ))}
+                  <Button variant="outline" disabled={busy || p.active || !draft.translation.trim() || draft.restored}
+                    onClick={() => {
+                      const fit = { font_size: 100, offset_x: 0, offset_y: 0, align: "center" };
+                      change(fit);
+                      void save({ ...draft, ...fit });
+                    }}>
+                    Auto-Fit Text
+                  </Button>
+                  <Button variant="outline" onClick={() => translationField.current?.focus()}>
+                    Edit Translation
+                  </Button>
                 </div>
                 <label className="field">
                   Recognized source
@@ -692,6 +744,7 @@ export default function Editor({
                 <label className="field">
                   Translation
                   <textarea
+                    ref={translationField}
                     className="resize-none"
                     rows={4}
                     value={draft.translation}
@@ -711,9 +764,7 @@ export default function Editor({
                 <details>
                   <summary>Text removal mask</summary>
                   <p className="hint">
-                    Select source lettering separately from the English
-                    placement box. Include and protect selections affect ink
-                    pixels only.
+                    Mark source lettering to include or artwork to protect during cleanup.
                   </p>
                   {(
                     [
@@ -761,7 +812,7 @@ export default function Editor({
                   <Button
                     variant="outline"
                     disabled={busy || p.active}
-                    onClick={save}
+                    onClick={() => void save(draft)}
                   >
                     Rebuild cleanup and preview
                   </Button>
@@ -800,7 +851,7 @@ export default function Editor({
                       />
                     </label>
                   ))}
-                  {["x", "y", "width", "height"].map((label, i) => (
+                  {!boundary && ["x", "y", "width", "height"].map((label, i) => (
                     <label key={label} className="field">
                       Box {label}
                       <input
@@ -818,8 +869,7 @@ export default function Editor({
                   ))}
                 </div>
                 <p className="hint">
-                  Noto Sans CJK · automatic fitting down to 12px. Position and
-                  box changes never rerun OCR.
+                  Automatic fitting uses 12px or larger. Enter line breaks in Translation.
                 </p>
                 <label className="check-field">
                   <input
@@ -865,7 +915,7 @@ export default function Editor({
                     <RotateCcw size={15} /> Retranslate saved text
                   </Button>
                 </div>
-                <Button disabled={busy || p.active} onClick={save}>
+                <Button disabled={busy || p.active} onClick={() => void save(draft)}>
                   <Save size={17} /> {p.active ? "Rendering…" : "Save changes"}
                 </Button>
                 <label className="field">
