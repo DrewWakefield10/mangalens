@@ -180,6 +180,7 @@ export async function translate(
   regions: Region[],
   who: string,
   project: CloudProject,
+  context?: string,
 ) {
   if (!process.env.DEEPL_API_KEY) fail(503, "DeepL is not configured.");
   const result = structuredClone(regions);
@@ -221,7 +222,7 @@ export async function translate(
       text: batch.map((r) => r.source_text),
       target_lang:
         targetCodes[project.target_lang] || project.target_lang.toUpperCase(),
-      context: texts.join("\n").slice(0, 12000),
+      context: (context ?? texts.join("\n")).slice(0, 12000),
       preserve_formatting: true,
     };
     if (project.source_lang !== "auto")

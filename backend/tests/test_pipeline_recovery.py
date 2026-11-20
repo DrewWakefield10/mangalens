@@ -16,7 +16,7 @@ from app.translation import quality_warnings
 from app.geometry import polygon_mask
 from app.geometry import detect_bubbles
 from pathlib import Path
-from test_api import upload
+from test_api import CONTROL, EMPTY_OCR, scan_and_confirm, upload
 
 
 def fixture_page():
@@ -300,35 +300,27 @@ def test_all_ocr_fallbacks_are_bounded_and_logged():
     assert any("tile fallback" in d["attempt"] for d in diagnostics)
 
 
-def test_no_recognition_is_reviewable_and_original_is_untouched(client):
-    p = upload(client)
-    pid = p["pages"][0]["id"]
+def test_no_speech_bubbles_skips_ocr_and_preserves_original(client):
+    p = scan_and_confirm(client, upload(client))
     original = client.get(p["pages"][0]["original"]).content
-    client.post("/api/projects/" + p["id"] + "/start", json={})
-    with patch("app.process.recognize", return_value=[]):
+    with patch("app.bubble_ocr.recognize_selection", side_effect=AssertionError("No OCR")), patch(
+        "app.process.cached_translate", side_effect=AssertionError("No translation")
+    ):
+        assert client.post("/api/projects/" + p["id"] + "/start", json={}).status_code == 200
         run(claim())
     page = client.get("/api/projects/" + p["id"]).json()["pages"][0]
-    assert page["status"] == "needs_review"
-    assert "editor" in page["error"]
-    assert client.get(page["original"]).content == original
-    assert client.get(page["translated"]).status_code == 200
+    assert page["status"] == "no_speech_bubbles"
+    assert client.get(page["translated"]).content == original
 
 
 def test_manual_region_ownership_validation_and_retry_preserves_corrections(client):
-    p = upload(client)
+    p = scan_and_confirm(client, upload(client), [CONTROL])
     pid = p["pages"][0]["id"]
-    assert (
-        client.post(
-            f"/api/pages/{pid}/regions", json={"box": [90, 100, 40, 40]}
-        ).status_code
-        == 422
-    )
-    response = client.post(
-        f"/api/pages/{pid}/regions", json={"box": [10, 10, 70, 80], "run_ocr": False}
-    )
-    assert response.status_code == 201, response.text
-    r = response.json()
-    run(claim())
+    assert client.post(f"/api/pages/{pid}/regions", json={"box": [10, 10, 70, 80]}).status_code == 409
+    with patch("app.bubble_ocr.recognize_selection", return_value=EMPTY_OCR):
+        assert client.post("/api/projects/" + p["id"] + "/start", json={}).status_code == 200
+        run(claim())
+    r = client.get(f"/api/pages/{pid}/regions").json()[0]
     saved = {
         "source_text": "手動の修正",
         "translation": "Manual correction",
@@ -340,7 +332,7 @@ def test_manual_region_ownership_validation_and_retry_preserves_corrections(clie
     page_after_edit = client.get("/api/projects/" + p["id"]).json()["pages"][0]
     assert page_after_edit["metrics"]["confirmed_text_regions"] == 1
     assert client.post(f"/api/regions/{r['id']}/retry/mask").status_code == 200
-    with patch("app.process.recognize", side_effect=AssertionError("Mask retry must reuse OCR")), patch(
+    with patch("app.bubble_ocr.recognize_selection", side_effect=AssertionError("Mask retry must reuse OCR")), patch(
         "app.process.cached_translate", side_effect=AssertionError("Mask retry must reuse translation")
     ):
         run(claim())
@@ -353,7 +345,7 @@ def test_manual_region_ownership_validation_and_retry_preserves_corrections(clie
         client.post(f"/api/pages/{pid}/ocr", json={"source_lang": "ja"}).status_code
         == 200
     )
-    with patch("app.process.recognize", return_value=[]):
+    with patch("app.bubble_ocr.recognize_selection", return_value=EMPTY_OCR):
         run(claim())
     regions = client.get(f"/api/pages/{pid}/regions").json()
     assert (
@@ -375,7 +367,7 @@ def test_manual_region_ownership_validation_and_retry_preserves_corrections(clie
 
 
 def test_page_ocr_retry_keeps_matching_automatic_region_id(client):
-    p = upload(client)
+    p = scan_and_confirm(client, upload(client), [CONTROL])
     page_id = p["pages"][0]["id"]
     detected = [{
         "box": [40, 40, 100, 100], "words": [[60, 55, 60, 60]],
@@ -384,7 +376,7 @@ def test_page_ocr_retry_keeps_matching_automatic_region_id(client):
         "warnings": [],
     }]
     assert client.post("/api/projects/" + p["id"] + "/start", json={}).status_code == 200
-    with patch("app.process.recognize", return_value=detected), patch(
+    with patch("app.bubble_ocr.recognize_selection", return_value=detected[0]), patch(
         "app.process.cached_translate", return_value=(["Today is good"], "argos", False)
     ):
         run(claim())
@@ -398,21 +390,23 @@ def test_page_ocr_retry_keeps_matching_automatic_region_id(client):
 
 
 def test_region_retry_keeps_targeted_cloud_ocr_as_review_suggestion(client, monkeypatch):
-    p = upload(client)
+    p = scan_and_confirm(client, upload(client), [CONTROL])
     page_id = p["pages"][0]["id"]
-    created = client.post(f"/api/pages/{page_id}/regions", json={"box": [10, 10, 70, 80]})
-    assert created.status_code == 201
+    assert client.post("/api/projects/" + p["id"] + "/start", json={}).status_code == 200
+    with patch("app.bubble_ocr.recognize_selection", return_value=EMPTY_OCR):
+        run(claim())
+    before = client.get(f"/api/pages/{page_id}/regions").json()[0]
     monkeypatch.setattr(settings, "ocr_space_api_key", "test-key")
     monkeypatch.setattr(settings, "cloud_ocr_provider", "ocr_space")
-    local = {"source_text": "", "confidence": 0, "words": [], "box": [10, 10, 70, 80]}
-    cloud = [{"box": [5, 5, 20, 30], "source_text": "\u3053\u3093\u306b\u3061\u306f"}]
-    with patch("app.process.recognize_selection", return_value=local), patch(
-        "app.process.ocr_space_recognize", return_value=cloud
-    ) as api:
+    cloud = [{"box": [5, 5, 20, 30], "source_text": "こんにちは"}]
+    assert client.post(f"/api/regions/{before['id']}/ocr").status_code == 200
+    with patch("app.bubble_ocr.recognize_selection", return_value=EMPTY_OCR), patch(
+        "app.bubble_ocr.space_recognize", return_value=cloud
+    ) as provider:
         run(claim())
     saved = client.get(f"/api/pages/{page_id}/regions").json()[0]
-    assert api.call_count == 1
-    assert saved["id"] == created.json()["id"]
+    assert provider.call_count == 1
+    assert saved["id"] == before["id"]
     assert saved["render"]["ocr_cloud_suggestion"] == "\u3053\u3093\u306b\u3061\u306f"
     assert saved["source_text"] == ""
     assert saved["render"]["ocr_retry_count"] == 1
@@ -422,41 +416,25 @@ def test_partial_translation_failure_keeps_successful_region(client):
     image = fixture_page()
     stream = io.BytesIO()
     image.save(stream, "PNG")
-    p = upload(client, [("files", ("test.png", stream.getvalue(), "image/png"))])
-    client.post("/api/projects/" + p["id"] + "/start", json={"source_lang": "ja"})
-    regions = [
-        {
-            "box": [40, 40, 180, 260],
-            "words": [[108, 70, 58, 140]],
-            "source_text": "今日は良い天気です",
-            "language": "ja",
-            "confidence": 0.9,
-            "render": {"source_box": [106, 65, 70, 150]},
-            "warnings": [],
-        },
-        {
-            "box": [290, 40, 180, 260],
-            "words": [[310, 100, 150, 30]],
-            "source_text": "こんにちは",
-            "language": "ja",
-            "confidence": 0.9,
-            "render": {},
-            "warnings": [],
-        },
+    p = scan_and_confirm(client, upload(client, [("files", ("test.png", stream.getvalue(), "image/png"))]),
+        [[[290, 40], [460, 40], [460, 300], [290, 300]]])
+    assert client.post("/api/projects/" + p["id"] + "/start", json={"source_lang": "ja"}).status_code == 200
+    detected = [
+        {"source_text": "こんばんは", "confidence": 0.9, "box": [20, 60, 100, 35],
+         "words": [[20, 60, 100, 35]]},
+        {"source_text": "今日は良い天気ですね", "confidence": 0.9, "box": [70, 40, 85, 140],
+         "words": [[70, 40, 85, 140]]},
     ]
-    with patch("app.process.recognize", return_value=regions), patch(
+    with patch("app.bubble_ocr.recognize_selection", side_effect=list(reversed(detected))), patch(
         "app.process.cached_translate",
-        side_effect=[
-            (["It is a nice day."], "argos", False),
-            ValueError("One region failed"),
-        ],
+        side_effect=[(["It is a nice day."], "argos", False), ValueError("One region failed")],
     ):
         run(claim())
     page = client.get("/api/projects/" + p["id"]).json()["pages"][0]
     assert page["status"] == "needs_review"
     saved = client.get(f"/api/pages/{page['id']}/regions").json()
     assert saved[0]["translation"] == "It is a nice day."
-    assert saved[0]["render"]["state"] == "rendering_completed"
+    assert saved[0]["render"]["state"] == "rendering_completed", saved[0]["warnings"]
     assert saved[1]["render"]["translation_error"] == "One region failed"
     assert saved[1]["render"]["diagnostic_status"] == "TRANSLATION_FAILED"
     assert page["metrics"]["completion"] == "PARTIALLY_COMPLETED"

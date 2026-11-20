@@ -37,6 +37,8 @@ async function wait(url) {
 try {
   run(["tests/fixtures/cloud-gateway.mjs"]);
   run([
+    "--import",
+    "./tests/fixtures/provider-fetch.mjs",
     "node_modules/next/dist/bin/next",
     "start",
     "--hostname",

@@ -12,6 +12,7 @@ import {
 } from "lucide-react";
 import { useProject } from "@/components/project-hooks";
 import { api, Region, ready, languages } from "@/lib/api";
+import { BubblePreviewDialog } from "@/components/bubble-preview";
 import { Button } from "@/components/ui/button";
 type Draft = {
   page_version: number;
@@ -77,11 +78,12 @@ export default function Editor({
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
   const [busy, setBusy] = useState(false);
+  const [preview, setPreview] = useState(false);
   const [view, setView] = useState("translated");
   const [showRegions, setShowRegions] = useState(true);
   const [glossaryText, setGlossaryText] = useState("");
   const [drawMode, setDrawMode] = useState<
-    "" | "add" | "source" | "include" | "exclude"
+    "" | "source" | "include" | "exclude"
   >("");
   const [selection, setSelection] = useState<number[] | null>(null);
   const [drawStart, setDrawStart] = useState<number[] | null>(null);
@@ -161,33 +163,7 @@ export default function Editor({
       setSelection(null);
       return;
     }
-    if (drawMode === "add") {
-      setBusy(true);
-      setError("");
-      try {
-        const added = await api<Region>("/pages/" + page.id + "/regions", {
-          method: "POST",
-          body: JSON.stringify({
-            box: selection,
-            language: ocrLanguage,
-            run_ocr: p.execution_mode !== "browser",
-          }),
-        });
-        setSelected(added.id);
-        setDraft(draftOf(added));
-        await client.invalidateQueries({ queryKey: ["regions", page.id] });
-        await client.invalidateQueries({ queryKey: ["project", id] });
-        setNotice(
-          p.execution_mode === "browser"
-            ? "Region added. Enter source text and translation, then save."
-            : "Region added. OCR is running on your selection.",
-        );
-      } catch (e) {
-        setError((e as Error).message);
-      } finally {
-        setBusy(false);
-      }
-    } else if (draft) {
+    if (draft) {
       if (drawMode === "source") change({ source_box: selection });
       if (drawMode === "include")
         change({ mask_include: [...draft.mask_include, selection] });
@@ -261,6 +237,15 @@ export default function Editor({
           <BookOpen size={16} /> Reader
         </Link>
       </div>
+      {preview && page && <BubblePreviewDialog projectId={id} pages={[page]}
+        initialBubble={typeof region?.render.bubble_id === "string" ? region.render.bubble_id : undefined}
+        onClose={() => setPreview(false)}
+        onTranslate={async item => {
+          await api("/pages/" + item.id + "/retry?changed_only=true", { method: "POST" });
+          setPreview(false);
+          dirty.current = false;
+          await client.invalidateQueries({ queryKey: ["project", id] });
+        }} />}
       <div className="editor-toolbar">
         <label>
           Page{" "}
@@ -297,12 +282,9 @@ export default function Editor({
         <Button
           variant="outline"
           disabled={busy || p.active}
-          onClick={() => {
-            setDrawMode(drawMode === "add" ? "" : "add");
-            setView("original");
-          }}
+          onClick={() => setPreview(true)}
         >
-          Add Text Region
+          Preview Detected Bubbles
         </Button>
         <label className="check-field">
           <input
@@ -328,7 +310,7 @@ export default function Editor({
         </label>
         <Button
           variant="outline"
-          disabled={busy || p.active || !page || dirty.current}
+          disabled={busy || p.active || !page?.bubble_reviewed || dirty.current}
           title={
             dirty.current
               ? "Save your changes before retrying OCR."
@@ -345,7 +327,7 @@ export default function Editor({
         {p.execution_mode === "browser" && (
           <Button
             variant="outline"
-            disabled={busy || p.active || !page || dirty.current}
+            disabled={busy || p.active || !page?.bubble_reviewed || dirty.current}
             title={
               dirty.current
                 ? "Save your changes before rebuilding this page."
@@ -646,16 +628,16 @@ export default function Editor({
                 )}
                 <Button
                   variant="outline"
-                  disabled={busy || p.active || p.execution_mode === "browser"}
-                  title={
-                    p.execution_mode === "browser"
-                      ? "Edit source text manually in this hosted version."
-                      : undefined
-                  }
+                  disabled={busy || p.active || !page.bubble_reviewed}
                   onClick={() => recover("/regions/" + region.id + "/ocr")}
                 >
                   Retry region OCR
                 </Button>
+                {Boolean(region.render.boundary_crossing) && (
+                  <Button variant="outline" disabled={p.active || busy} onClick={() => setPreview(true)}>
+                    Edit Bubble Boundary
+                  </Button>
+                )}
                 <div className="actions">
                   {(["mask", "clean", "render"] as const).map((stage) => (
                     <Button
@@ -923,8 +905,7 @@ export default function Editor({
               <div className="empty">
                 <h3>No detected regions yet.</h3>
                 <p>
-                  Click Add Text Region and draw around dialogue to recognize or
-                  enter its text manually.
+                  Open Preview Detected Bubbles to check an outline or add a missed bubble.
                 </p>
                 <Link className="button outline" href={"/projects/" + id}>
                   Chapter dashboard

@@ -362,12 +362,13 @@ def translate(
         return result
 
 
-def cached_translate(db, owner, texts, source, project, glossary, context="", details=None, fallback_source=None, fallback_confidence=1):
+def cached_translate(db, owner, texts, source, project, glossary, context="", details=None, fallback_source=None, fallback_confidence=1, bubble_scope=None):
     key = hashlib.sha256(
         json.dumps(
             [
                 owner,
                 "translation-v4",
+                bubble_scope,
                 texts,
                 source,
                 project.target_lang,

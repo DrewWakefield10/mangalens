@@ -11,7 +11,7 @@ export default function About() {
       <h2>How it works</h2>
       <p>
         Upload images, an image archive or a PDF. Choose the source and target
-        language, then start processing. The hosted version reads text with
+        language, review the detected speech bubbles, then start processing. The hosted version reads text with
         OCR.space and translates dialogue with DeepL. Your open browser tab
         prepares images, applies conservative cleanup and fits translated text.
         Private files and progress are saved in Supabase.
@@ -43,8 +43,8 @@ export default function About() {
         can delete a paused chapter in the app.
       </p>
       <p>
-        OCR.space receives page image tiles. DeepL receives recognized text and
-        nearby dialogue as context. Provider keys stay on the server. There is
+        OCR.space receives masked crops from approved bubbles. DeepL receives recognized text and
+        context from those bubbles. Provider keys stay on the server. There is
         no public sharing endpoint or account recovery for temporary libraries.
       </p>
       <h2>Content permissions</h2>

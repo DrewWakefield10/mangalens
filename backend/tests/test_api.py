@@ -36,6 +36,27 @@ def upload(client, files=None):
     return response.json()
 
 
+CONTROL = [[10, 10], [89, 10], [89, 109], [10, 109]]
+EMPTY_OCR = {"source_text": "", "confidence": 0, "words": [], "box": [0, 0, 1, 1]}
+
+
+def scan_and_confirm(client, project, manual=()):
+    base = "/api/projects/" + project["id"]
+    assert client.post(base + "/bubble-scans", json={}).status_code == 200
+    for page in project["pages"]:
+        run(claim())
+        url = "/api/pages/" + page["id"] + "/bubbles"
+        scan = client.get(url).json()
+        assert scan["status"] == "ready"
+        additions = [{"polygon": polygon, "decision": "approved", "confirmed": True}
+                     for polygon in manual]
+        if scan["bubbles"] or additions:
+            response = client.put(url, json={"revision": scan["revision"],
+                "bubbles": scan["bubbles"] + additions})
+            assert response.status_code == 200, response.text
+    return client.get(base).json()
+
+
 def test_upload_ownership_and_deletion(client):
     p = upload(client)
     page = p["pages"][0]
@@ -190,6 +211,7 @@ def test_start_order_and_cancellation(client):
         client, [("files", ("2.png", picture())), ("files", ("1.png", picture()))]
     )
     assert p["pages"][0]["name"] == "1.png"
+    scan_and_confirm(client, p)
     with patch("app.main.capability", return_value=True):
         assert (
             client.post(
@@ -213,21 +235,19 @@ def test_start_order_and_cancellation(client):
     )
 
 
-def test_failed_ocr_and_retry(client):
+def test_failed_bubble_scan_and_retry(client):
     p = upload(client)
-    with patch("app.main.capability", return_value=True):
-        client.post("/api/projects/" + p["id"] + "/start", json={})
-    job = claim()
-    assert job
-    with patch("app.process.recognize", side_effect=ValueError("OCR unavailable")):
-        run(job)
-    assert (
-        client.get("/api/projects/" + p["id"]).json()["pages"][0]["status"] == "failed"
-    )
-    assert (
-        client.post("/api/pages/" + p["pages"][0]["id"] + "/retry").status_code == 200
-    )
-    assert claim() is not None
+    base = "/api/projects/" + p["id"]
+    page = "/api/pages/" + p["pages"][0]["id"]
+    assert client.post(base + "/bubble-scans", json={}).status_code == 200
+    with patch("app.process.detect_speech_bubbles", side_effect=TimeoutError("Detector timed out")):
+        run(claim())
+    scan = client.get(page + "/bubbles").json()
+    assert scan["status"] == "failed"
+    assert "TimeoutError" in scan["reason"]
+    assert client.post(page + "/retry").status_code == 409
+    scan_and_confirm(client, p)
+    assert client.get(page + "/bubbles").json()["status"] == "ready"
 
 
 def test_cache_avoids_duplicate_provider_calls(client):
@@ -287,21 +307,21 @@ def test_lease_recovery_and_unique_active_job(client):
 
 @pytest.mark.parametrize("stage", ["translation", "inpainting"])
 def test_pipeline_errors_are_explicit(client, stage):
-    p = upload(client)
+    p = scan_and_confirm(client, upload(client), [CONTROL])
     with patch("app.main.capability", return_value=True):
-        client.post("/api/projects/" + p["id"] + "/start", json={})
+        client.post("/api/projects/" + p["id"] + "/start", json={"source_lang": "ja"})
     job = claim()
     region = {
         "box": [10, 10, 80, 60],
         "words": [[10, 10, 60, 30]],
-        "source_text": "hello",
+        "source_text": "\u3053\u3093\u306b\u3061\u306f",
         "language": "en",
         "confidence": 0.9,
         "render": {},
         "warnings": [],
         "orientation": "horizontal",
     }
-    with patch("app.process.recognize", return_value=[region]):
+    with patch("app.bubble_ocr.recognize_selection", return_value=region):
         if stage == "translation":
             with patch(
                 "app.process.cached_translate",
@@ -317,8 +337,14 @@ def test_pipeline_errors_are_explicit(client, stage):
             ):
                 run(job)
     result = client.get("/api/projects/" + p["id"]).json()["pages"][0]
-    assert result["status"] == "failed" and result["error"]
-    assert client.get(result["translated"]).status_code == 404
+    if stage == "translation":
+        assert result["status"] == "needs_review"
+        regions = client.get(f"/api/pages/{result['id']}/regions").json()
+        assert regions[0]["render"]["translation_error"] == "Provider unavailable"
+        assert client.get(result["translated"]).content == client.get(result["original"]).content
+    else:
+        assert result["status"] == "failed" and "RuntimeError" in result["error"]
+        assert client.get(result["translated"]).status_code == 404
 
 
 def test_streaming_request_limit():
@@ -341,7 +367,7 @@ def test_real_japanese_pipeline(client):
     if not (ROOT / "models/argos/ja_en/model/model.bin").exists():
         pytest.skip("Install CPU models with scripts/setup_models.py")
     sample = (ROOT / "samples/japanese-page.png").read_bytes()
-    p = upload(client, [("files", ("japanese.png", sample, "image/png"))])
+    p = scan_and_confirm(client, upload(client, [("files", ("japanese.png", sample, "image/png"))]))
     page = p["pages"][0]
     assert client.get(f"/api/pages/{page['id']}/image/clean?v=0").status_code == 404
     assert (
@@ -402,7 +428,7 @@ def test_real_japanese_pipeline(client):
     assert client.get("/api/projects/" + p["id"] + "/export").status_code == 422
     r = regions[0]
     with patch(
-        "app.process.recognize", side_effect=AssertionError("Edits must not rerun OCR")
+        "app.bubble_ocr.recognize_selection", side_effect=AssertionError("Edits must not rerun OCR")
     ), patch(
         "app.process.cached_translate",
         side_effect=AssertionError("Edits must not retranslate"),

@@ -5,7 +5,6 @@ import { useRouter } from "next/navigation";
 import {
   BookOpen,
   Pencil,
-  RotateCcw,
   Trash2,
   Download,
   ArrowLeft,
@@ -14,7 +13,8 @@ import {
 } from "lucide-react";
 import DeleteProjectDialog from "@/components/delete-project-dialog";
 import { useProject } from "@/components/project-hooks";
-import { api, languages, ready } from "@/lib/api";
+import { api, languages, ready, type Page } from "@/lib/api";
+import { BubblePreviewDialog } from "@/components/bubble-preview";
 import { Button } from "@/components/ui/button";
 export default function Dashboard({
   params,
@@ -24,6 +24,8 @@ export default function Dashboard({
   const { id } = use(params);
   const { data: p, error, refetch } = useProject(id);
   const [actionError, setError] = useState("");
+  const [preview, setPreview] = useState<Page[] | null>(null);
+  const [previewReady, setPreviewReady] = useState(false);
   const [busy, setBusy] = useState(false);
   const [exportRights, setRights] = useState(false);
   const [exportStatus, setExportStatus] = useState("");
@@ -117,20 +119,11 @@ export default function Dashboard({
           ) : (
             <Button
               variant="outline"
-              disabled={busy || (p.execution_mode === "browser" && p.ready === p.pages.length)}
-              onClick={() =>
-                action("/projects/" + id + "/start", "POST", {
-                  source_lang: p.source_lang,
-                  target_lang: p.target_lang,
-                  quality: p.quality,
-                  style: p.style,
-                  provider: p.provider,
-                  direction: p.direction,
-                })
-              }
+              disabled={busy}
+              onClick={() => { setPreviewReady(false); setPreview(p.pages); }}
             >
               <Play size={15} />{" "}
-              {p.execution_mode === "browser" ? "Start / resume translation" : p.ready ? "Reprocess chapter" : "Start / resume translation"}
+              Preview Detected Bubbles
             </Button>
           )}
           <a className="text-link" href={"/api/projects/" + id + "/metadata"}>
@@ -153,7 +146,9 @@ export default function Dashboard({
               <small>PAGE {String(i + 1).padStart(2, "0")}</small>
               <h3>{page.name}</h3>
               <span className={"status " + page.status}>
-                {page.status.replaceAll("_", " ")}
+                {page.bubble_scan_status === "failed" ? "Bubble Scan Failed" :
+                  page.status === "no_speech_bubbles" ? "No Speech Bubbles Found" :
+                  page.status === "no_bubbles_selected" ? "No Bubbles Selected" : page.status.replaceAll("_", " ")}
               </span>
               {p.active && page.status !== "queued" && page.status !== "imported" &&
                 page.status !== "completed" && page.status !== "needs_review" &&
@@ -190,31 +185,37 @@ export default function Dashboard({
                   Open Editor <Pencil size={15} />
                 </Link>
               )}
-              {!p.active && p.execution_mode !== "browser" && (
-                <Button
-                  variant="outline"
-                  disabled={busy}
-                  onClick={() =>
-                    action("/pages/" + page.id + "/ocr", "POST", {})
-                  }
-                >
-                  Retry OCR
-                </Button>
-              )}
               {!p.active && (
-                <button
-                  className="icon-button"
-                  aria-label={"Retry page " + (i + 1)}
-                  disabled={busy}
-                  onClick={() => action("/pages/" + page.id + "/retry")}
-                >
-                  <RotateCcw size={17} />
-                </button>
+                <Button variant="outline" disabled={busy}
+                  onClick={() => setPreview([page])}>
+                  {page.bubble_scan_status === "failed" ? "Retry bubble scan" : "Preview page bubbles"}
+                </Button>
               )}
             </div>
           </article>
         ))}
       </div>
+      {preview && <BubblePreviewDialog projectId={id} pages={preview} onReady={setPreviewReady}
+        onClose={() => { setPreview(null); void refetch(); }}
+        onTranslate={preview.length === 1 ? async page => {
+          await api("/pages/" + page.id + "/retry?changed_only=true", { method: "POST" });
+          setPreview(null);
+          await refetch();
+        } : undefined}
+        footer={preview.length > 1 ? <>{actionError && <p role="alert" className="error">{actionError}</p>}<Button disabled={!previewReady || busy} onClick={async () => {
+          setBusy(true);
+          setError("");
+          try {
+            await api("/projects/" + id + "/start", { method: "POST", body: JSON.stringify({
+              source_lang: p.source_lang, target_lang: p.target_lang, quality: p.quality,
+              style: p.style, provider: p.provider, direction: p.direction,
+            }) });
+            setPreview(null);
+            await refetch();
+          } catch (error) { setError((error as Error).message); }
+          finally { setBusy(false); }
+        }}>{p.ready ? "Reprocess chapter" : "Translate chapter"}</Button></> : null}
+      />}
       <div className="export-row panel">
         <div>
           <h3>Take your chapter with you.</h3>

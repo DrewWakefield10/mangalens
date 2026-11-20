@@ -38,7 +38,7 @@ export function vertical(r: Region) {
     /[\u3000-\u9fff\uf900-\ufaff]/u.test(r.source_text) && b[3] > b[2] * 1.45
   );
 }
-export function speechMap(image: Raster): SpeechMap {
+export function speechMap(image: Raster, maxArea = 0.18): SpeechMap {
   const { width: w, height: h, data } = image,
     n = w * h;
   const bright = new Uint8Array(n),
@@ -94,7 +94,7 @@ export function speechMap(image: Raster): SpeechMap {
     if (
       edge ||
       tail < 100 ||
-      tail > n * 0.18 ||
+      tail > n * maxArea ||
       tail / (bw * bh) < 0.55 ||
       bw < 16 ||
       bh < 16

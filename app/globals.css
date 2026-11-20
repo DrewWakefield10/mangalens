@@ -1849,3 +1849,125 @@ footer a {
 .browser-processing small { display: block; color: var(--muted); margin-top: 4px; }
 .browser-processing .text-link { flex-shrink: 0; }
 @media (max-width: 640px) { .browser-processing { margin: 12px; flex-wrap: wrap; } .browser-processing > div { flex-basis: 100%; } }
+
+.bubble-modal {
+  width: min(1040px, calc(100vw - 24px));
+}
+.bubble-preview {
+  margin-block: 20px;
+}
+.bubble-preview-toolbar {
+  align-items: center;
+  margin-block: 12px;
+}
+.bubble-preview-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1.45fr) minmax(200px, 1fr);
+  align-items: start;
+  gap: 16px;
+}
+.bubble-stage {
+  display: grid;
+  justify-items: center;
+  background: var(--panel-soft);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  overflow: auto;
+  max-height: 62vh;
+}
+.bubble-stage img {
+  display: block;
+  width: 100%;
+  height: auto;
+}
+.bubble-stage > img {
+  max-width: 340px;
+}
+.bubble-stage > div:not(.bubble-canvas) {
+  padding: 12px;
+}
+.bubble-canvas {
+  position: relative;
+  width: 100%;
+}
+.bubble-canvas svg {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+}
+.bubble-canvas .drawing {
+  cursor: crosshair;
+}
+.bubble-outline {
+  fill: rgba(180, 166, 255, .15);
+  stroke: #7047cf;
+  stroke-width: 2px;
+  cursor: pointer;
+}
+.bubble-outline.pending {
+  fill: rgba(239, 177, 64, .20);
+  stroke: #a65607;
+  stroke-dasharray: 5 3;
+}
+.bubble-outline.dismissed {
+  fill: transparent;
+  stroke: #69717b;
+  stroke-dasharray: 3 5;
+}
+.bubble-outline.selected {
+  stroke-width: 3px;
+}
+.bubble-outline.draft {
+  fill: none;
+  stroke: #7047cf;
+}
+.bubble-canvas circle {
+  fill: #7047cf;
+  stroke: white;
+  stroke-width: 2px;
+  pointer-events: none;
+}
+.bubble-cursor {
+  opacity: 0;
+}
+.bubble-canvas svg:focus-visible .bubble-cursor {
+  opacity: 1;
+}
+.bubble-list {
+  list-style: none;
+  margin: 0 0 12px;
+  padding: 0;
+  max-height: 186px;
+  overflow: auto;
+}
+.bubble-list button {
+  width: 100%;
+  padding: 8px 10px;
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+  background: transparent;
+  color: var(--text);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  text-align: left;
+}
+.bubble-list button[aria-pressed="true"] {
+  border-color: var(--accent);
+  background: var(--panel-soft);
+}
+.bubble-list button span {
+  color: var(--muted);
+}
+.bubble-review .actions {
+  flex-wrap: wrap;
+}
+@media (max-width: 640px) {
+  .bubble-preview-grid {
+    grid-template-columns: minmax(0, 1fr);
+  }
+  .bubble-stage {
+    max-height: 54vh;
+  }
+}

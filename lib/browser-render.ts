@@ -1,57 +1,8 @@
+import { polygonRows, type Point } from "./bubble-geometry";
 import { speechMap, bubbleInk } from "./page-layout";
 import type { Region } from "./api";
 import type { CloudPage } from "./cloud-types";
 import { blobOf, canvasOf } from "./browser-pages";
-export type BrowserTile = {
-  index: number;
-  count: number;
-  x: number;
-  y: number;
-  width: number;
-  height: number;
-  base64: string;
-};
-export async function makeTiles(bitmap: ImageBitmap) {
-  const tiles: Omit<BrowserTile, "count">[] = [];
-  for (let y = 0; y < bitmap.height; y += 1400)
-    for (let x = 0; x < bitmap.width; x += 1400) {
-      const width = Math.min(1500, bitmap.width - x),
-        height = Math.min(1500, bitmap.height - y);
-      // Do not create a tiny redundant sliver already covered by the previous overlap.
-      if ((x > 0 && width <= 100) || (y > 0 && height <= 100)) continue;
-      const canvas = canvasOf(width, height);
-      canvas
-        .getContext("2d")!
-        .drawImage(bitmap, x, y, width, height, 0, 0, width, height);
-      let blob = await blobOf(canvas, "image/jpeg", 0.9);
-      for (const quality of [0.8, 0.65, 0.5])
-        if (blob.size > 990000)
-          blob = await blobOf(canvas, "image/jpeg", quality);
-      canvas.width = canvas.height = 0;
-      if (blob.size > 990000)
-        throw new Error(
-          "This page needs smaller OCR tiles. Use a smaller image.",
-        );
-      const bytes = new Uint8Array(await blob.arrayBuffer());
-      let binary = "";
-      for (let offset = 0; offset < bytes.length; offset += 8192)
-        binary += String.fromCharCode(...bytes.subarray(offset, offset + 8192));
-      tiles.push({
-        index: tiles.length,
-        x,
-        y,
-        width,
-        height,
-        base64: btoa(binary),
-      });
-      await new Promise((r) => setTimeout(r, 0));
-    }
-  if (tiles.length > 12)
-    throw new Error(
-      "This page exceeds the 12-tile OCR limit. Use a smaller image.",
-    );
-  return tiles.map((tile) => ({ ...tile, count: tiles.length }));
-}
 let font: Promise<void> | undefined;
 function loadFont() {
   return (font ||= (async () => {
@@ -226,6 +177,20 @@ function fitText(
     if (best) return { size: best.size, lines: best.lines };
   }
 }
+function paintText(target: CanvasRenderingContext2D, region: Region, layout: { size: number; lines: TextLine[] }) {
+  target.font = layout.size + 'px "MangaLensCJK"';
+  target.fillStyle = "#111";
+  target.textBaseline = "top";
+  const align = String(region.render.align || "center") as CanvasTextAlign;
+  target.textAlign = align;
+  for (const line of layout.lines) {
+    const x = line.x + (align === "left" ? 0 : align === "right" ? line.width : line.width / 2)
+      + Number(region.render.offset_x || 0);
+    const y = line.y + Number(region.render.offset_y || 0);
+    target.fillText(line.text, x, y);
+  }
+}
+
 export async function renderPage(
   bitmap: ImageBitmap,
   page: CloudPage,
@@ -275,9 +240,15 @@ export async function renderPage(
       diagnostic.status = "RESTORED";
       continue;
     }
+    if (region.render.boundary_crossing) {
+      preserve("Lettering crosses the selection. Edit Bubble Boundary.");
+      continue;
+    }
+    const boundary = region.render.bubble_polygon as Point[] | undefined;
+    const approved = boundary ? polygonRows(boundary) : undefined;
     if (!region.translation.trim()) {
       preserve(
-        "no translated text was available; original lettering was preserved.",
+        String(region.render.failure_reason || "No translated text was available. Original lettering was preserved."),
       );
       continue;
     }
@@ -363,6 +334,19 @@ export async function renderPage(
           }
       }
     }
+    if (approved && !ink.length && !includes.length) {
+      const [x, y, w, h] = source;
+      let light = 0;
+      for (let yy = y; yy < y + h; yy++)
+        for (let xx = x; xx < x + w; xx++) {
+          if (!approved.contains(xx, yy)) continue;
+          const p = (yy * width + xx) * 4;
+          if (Math.min(original.data[p], original.data[p + 1], original.data[p + 2]) < 210)
+            ink.push(yy * width + xx);
+          else light++;
+        }
+      if (light < ink.length * 3) ink.length = 0;
+    }
     if (!ink.length) {
       preserve(
         "a safe lettering mask could not be found; original artwork was preserved.",
@@ -410,8 +394,43 @@ export async function renderPage(
           )
             continue;
           if (clip && !inside(xx, yy, clip)) continue;
+          if (approved && (!approved.contains(xx - 1, yy) || !approved.contains(xx + 1, yy) ||
+            !approved.contains(xx, yy - 1) || !approved.contains(xx, yy + 1))) continue;
           marked.add(yy * width + xx);
         }
+    }
+    if (!marked.size) {
+      preserve("No validated lettering pixels are inside this bubble.");
+      continue;
+    }
+    if (approved) {
+      const padding = layout.size * 2 + 6;
+      const x = approved.x - padding, y = approved.y - padding;
+      const layer = canvasOf(approved.width + 2 * padding, approved.height + 2 * padding);
+      const ctx = layer.getContext("2d", { willReadFrequently: true })!;
+      ctx.translate(-x, -y);
+      paintText(ctx, region, layout);
+      const rgba = ctx.getImageData(0, 0, layer.width, layer.height).data;
+      let glyphs = 0;
+      let invalid = false;
+      for (let i = 3; i < rgba.length; i += 4) {
+        if (!rgba[i]) continue;
+        glyphs++;
+        const index = (i - 3) / 4;
+        const px = x + index % layer.width, py = y + Math.floor(index / layer.width);
+        const originalIndex = py * width + px;
+        if (!approved.contains(px - 2, py) || !approved.contains(px + 2, py)
+            || !approved.contains(px, py - 2) || !approved.contains(px, py + 2)
+            || (!marked.has(originalIndex) && original.data[originalIndex * 4] < 110)) {
+          invalid = true;
+          break;
+        }
+      }
+      layer.width = layer.height = 0;
+      if (!glyphs || invalid) {
+        preserve("Translated lettering or original ink crosses the usable area. Adjust the layout.");
+        continue;
+      }
     }
     for (const p of marked) maskPixels[p] = 1;
     diagnostic.status = "RENDERED_NEEDS_REVIEW";
@@ -432,43 +451,7 @@ export async function renderPage(
   cleanCtx.putImageData(new ImageData(pixels, width, height), 0, 0);
   maskCtx.putImageData(maskData, 0, 0);
   target.drawImage(clean, 0, 0);
-  for (const { region, layout } of drawable) {
-    target.font = layout.size + 'px "MangaLensCJK"';
-    target.fillStyle = "#111";
-    target.textBaseline = "top";
-    const align = String(region.render.align || "center") as CanvasTextAlign;
-    target.textAlign = align;
-    for (const line of layout.lines) {
-      const x =
-          line.x +
-          (align === "left"
-            ? 0
-            : align === "right"
-              ? line.width
-              : line.width / 2) +
-          Number(region.render.offset_x || 0),
-        y = line.y + Number(region.render.offset_y || 0);
-      target.save();
-      target.beginPath();
-      if (region.render.user_edited)
-        target.rect(
-          ...(bounded(region.box, width, height) as [
-            number,
-            number,
-            number,
-            number,
-          ]),
-        );
-      else target.rect(line.x, line.y, line.width, layout.size * 1.2);
-      target.clip();
-      target.fillText(line.text, x, y);
-      target.restore();
-    }
-  }
-  if (!regions.length)
-    warnings.push(
-      "No text was recognized. Retry page OCR, or add text regions manually.",
-    );
+  for (const { region, layout } of drawable) paintText(target, region, layout);
   const result = {
     translated: await blobOf(translated),
     clean: await blobOf(clean),

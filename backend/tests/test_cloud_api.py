@@ -100,6 +100,7 @@ def test_cloud_ocr_paragraphs_keep_geometry_and_language():
 
 
 def test_usage_api_reports_counts_without_secrets(client, monkeypatch):
+    monkeypatch.setattr(settings, "deepl_api_key", "test-only:fx")
     monkeypatch.setattr("app.main.account_usage", lambda: {"character_count": 29, "character_limit": 1000})
     response = client.get("/api/usage")
     assert response.status_code == 200

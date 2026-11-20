@@ -32,6 +32,20 @@ def main():
         response.raise_for_status()
         project = response.json()
         pid = project["id"]
+        client.post(f"/api/projects/{pid}/bubble-scans", json={}).raise_for_status()
+        bubble_url = f"/api/pages/{project['pages'][0]['id']}/bubbles"
+        for _ in range(60):
+            scan = client.get(bubble_url).json()
+            if scan["status"] == "ready":
+                break
+            if scan["status"] == "failed":
+                raise RuntimeError(scan["reason"])
+            time.sleep(1)
+        assert len(scan["bubbles"]) == 1 and scan["bubbles"][0]["detection"] == "accepted"
+        # The CC0 demo has one known speech bubble.
+        client.put(bubble_url, json={
+            "revision": scan["revision"], "bubbles": scan["bubbles"],
+        }).raise_for_status()
         client.post(
             "/api/projects/" + pid + "/start",
             json={"source_lang": "ja", "provider": "argos"},

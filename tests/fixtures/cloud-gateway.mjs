@@ -121,31 +121,6 @@ const server = createServer(async (req, res) => {
     }
     if (input.name === "ml_create_pages") {
       for (const p of input.body.p_pages) {
-        // The fixture supplies recognized/translated text so browser render/storage can
-        // be tested without making live provider requests or consuming real quota.
-        p.regions = [
-          {
-            id: randomUUID(),
-            page_id: p.id,
-            box: [110, 150, 260, 130],
-            source_text: "Hello!",
-            translation: "A new chapter",
-            language: "en",
-            confidence: 0,
-            orientation: "horizontal",
-            kind: "cloud_text",
-            render: {
-              words: [[140, 170, 180, 70]],
-              source_box: [110, 150, 260, 130],
-              source_verified: false,
-            },
-            warnings: ["Review cloud OCR"],
-            restored: false,
-          },
-        ];
-        p.translated = true;
-        p.tiles_done = [0];
-        p.tile_count = 1;
         tables.ml_documents.push({
           id: p.id,
           owner: input.body.p_owner,

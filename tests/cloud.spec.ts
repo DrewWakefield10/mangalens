@@ -20,6 +20,14 @@ test("browser import, rendering, private ownership, editor save, exports and del
     const ctx = canvas.getContext("2d")!;
     ctx.fillStyle = "white";
     ctx.fillRect(0, 0, 800, 1100);
+    ctx.strokeStyle = "black";
+    ctx.lineWidth = 6;
+    ctx.beginPath();
+    ctx.ellipse(215, 197, 140, 90, 0, 0, Math.PI * 2);
+    ctx.stroke();
+    ctx.fillStyle = "red";
+    ctx.fillRect(85, 116, 14, 14);
+    ctx.fillText("OUTSIDE", 490, 220);
     ctx.fillStyle = "black";
     ctx.font = "36px Arial";
     ctx.fillText("Hello!", 145, 215);
@@ -38,8 +46,11 @@ test("browser import, rendering, private ownership, editor save, exports and del
   await page.getByRole("button", { name: "Preview chapter" }).click();
   await expect(page.getByRole("dialog")).toBeVisible();
   await expect(
-    page.getByRole("dialog").getByText("1 pages", { exact: false }),
+    page.getByRole("dialog").getByText(/^1 pages ·/),
   ).toBeVisible();
+  await expect(page.getByRole("button", { name: "Translate Chapter" })).toBeDisabled();
+  await expect(page.locator(".bubble-outline.approved")).toHaveCount(1);
+  await page.getByRole("button", { name: "Save page selection" }).click();
   await page.getByRole("button", { name: "Translate Chapter" }).click();
   await expect(page).toHaveURL(/\/projects\/[a-f0-9-]+/);
   const id = page.url().split("/").pop()!;
@@ -138,16 +149,16 @@ test("API rejects foreign origins, competing claims and stale processing tokens"
   });
   expect(created.status()).toBe(201);
   const project = await created.json();
-  const png = Buffer.from(
-    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVQIHWP4z8DwHwAFgAI/ScLbtAAAAABJRU5ErkJggg==",
-    "base64",
-  );
+  const { default: sharp } = await import("sharp");
+  const png = await sharp(Buffer.from(
+    '<svg width="256" height="256"><rect width="256" height="256" fill="white"/><ellipse cx="120" cy="124" rx="70" ry="46" fill="white" stroke="black" stroke-width="5"/><path d="M98 114h10v15H98z M114 114h10v15H114z M130 114h10v15H130z"/></svg>',
+  )).png().toBuffer();
   const imported = await request.post(
     "/api/projects/" + project.id + "/pages",
     {
       headers,
       data: {
-        pages: [{ name: "one.png", width: 1, height: 1, bytes: png.length }],
+        pages: [{ name: "one.png", width: 256, height: 256, bytes: png.length }],
       },
     },
   );
@@ -172,6 +183,15 @@ test("API rejects foreign origins, competing claims and stale processing tokens"
       headers,
       data: { source_lang: "ja", target_lang: "en", provider: "deepl" },
     });
+  expect((await start()).status()).toBe(409);
+  expect((await request.post("/api/projects/" + project.id + "/bubble-scans", { headers, data: {} })).ok()).toBeTruthy();
+  const scanUrl = "/api/pages/" + asset.id + "/bubbles";
+  const scan = await (await request.get(scanUrl)).json();
+  expect(scan.status).toBe("ready");
+  expect(scan.bubbles).toHaveLength(1);
+  scan.bubbles[0].decision = "approved";
+  scan.bubbles[0].confirmed = true;
+  expect((await request.put(scanUrl, { headers, data: { revision: scan.revision, bubbles: scan.bubbles } })).ok()).toBeTruthy();
   expect((await start()).ok()).toBeTruthy();
   const claims = await Promise.all(
     [1, 2].map(() =>
@@ -202,7 +222,11 @@ test("API rejects foreign origins, competing claims and stale processing tokens"
     await request.post("/api/projects/" + project.id + "/claim", { headers })
   ).json();
   expect(second.token).not.toBe(first.token);
-  expect(second.page.regions[0].source_text).toBe("Hello!");
+  expect((await request.post("/api/pages/" + asset.id + "/recognize", {
+    headers, data: { token: second.token, index: 0 },
+  })).ok()).toBeTruthy();
+  const [region] = await (await request.get("/api/pages/" + asset.id + "/regions")).json();
+  expect(region.source_text).toBe("Hello!");
   expect(
     (
       await request.post("/api/pages/" + asset.id + "/failed", {
@@ -211,7 +235,6 @@ test("API rejects foreign origins, competing claims and stale processing tokens"
       })
     ).ok(),
   ).toBeTruthy();
-  const region = second.page.regions[0];
   expect(
     (
       await request.put("/api/regions/" + region.id, {
@@ -231,13 +254,13 @@ test("API rejects foreign origins, competing claims and stale processing tokens"
       source_text: "Saved correction",
       translation: "Keep my translation",
       language: "ja",
-      box: [0, 0, 1, 1],
-      source_box: [0, 0, 1, 1],
+      box: region.box,
+      source_box: region.render.source_box,
       font_size: 42,
       align: "center",
       offset_x: 0,
       offset_y: 0,
-      source_verified: false,
+      source_verified: true,
       restored: false,
       mask_include: [],
       mask_exclude: [],
@@ -264,30 +287,11 @@ test("API rejects foreign origins, competing claims and stale processing tokens"
   expect(retry.page.regions).toHaveLength(1);
   expect(retry.page.regions[0].source_text).toBe("Saved correction");
   expect(retry.page.regions[0].translation).toBe("Keep my translation");
-  expect(retry.page.tiles_done).toEqual([]);
+  expect(retry.page.tiles_done).toEqual([0]);
   expect(retry.page.metrics.ocr_language).toBe("ja");
-  expect(
-    (
-      await request.post("/api/pages/" + asset.id + "/prepare", {
-        headers,
-        data: {
-          token: retry.token,
-          groups: [{ ids: [region.id, region.id], box: [0, 0, 1, 1] }],
-        },
-      })
-    ).status(),
-  ).toBe(400);
-  expect(
-    (
-      await request.post("/api/pages/" + asset.id + "/prepare", {
-        headers,
-        data: {
-          token: retry.token,
-          groups: [{ ids: [region.id], box: [0, 0, 1, 1] }],
-        },
-      })
-    ).ok(),
-  ).toBeTruthy();
+  expect((await request.post("/api/pages/" + asset.id + "/prepare", {
+    headers, data: { token: retry.token, groups: [{ ids: [region.id], box: [0, 0, 256, 256] }] },
+  })).status()).toBe(409);
   expect(
     (
       await request.post("/api/pages/" + asset.id + "/translate", {

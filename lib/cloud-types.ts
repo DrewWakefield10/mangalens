@@ -1,4 +1,5 @@
 import type { Region } from "./api";
+import type { BubbleScan } from "./bubble-geometry";
 
 export type CloudPage = {
   id: string;
@@ -13,6 +14,7 @@ export type CloudPage = {
   regions: Region[];
   metrics: Record<string, unknown>;
   uploaded: boolean;
+  bubble_scan?: BubbleScan;
   lease?: { token: string; until: number };
   tiles_done: number[];
   tile_count: number;

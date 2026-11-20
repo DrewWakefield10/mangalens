@@ -49,7 +49,7 @@ export default function BrowserProcessor() {
           if (!claim) return;
           const { page, token } = claim;
           try {
-            const { makeTiles, renderPage } =
+            const { renderPage } =
               await import("@/lib/browser-render");
             const { uploadImage } = await import("@/lib/browser-pages");
             setMessage("Preparing " + page.name + "… Keep this tab open.");
@@ -64,54 +64,14 @@ export default function BrowserProcessor() {
             const bitmap = await createImageBitmap(await response.blob());
             try {
               if (!page.translated) {
-                const tiles = await makeTiles(bitmap);
-                for (const tile of tiles) {
-                  if (stopped)
-                    throw new DOMException("Processing paused", "AbortError");
-                  if (page.tiles_done.includes(tile.index)) continue;
-                  setMessage(
-                    "Recognizing " +
-                      page.name +
-                      " · tile " +
-                      (tile.index + 1) +
-                      " of " +
-                      tiles.length +
-                      ". Keep this tab open.",
-                  );
+                for (let index = 0; index < page.tile_count; index++) {
+                  if (stopped) throw new DOMException("Processing paused", "AbortError");
+                  if (page.tiles_done.includes(index)) continue;
+                  setMessage(`Recognizing ${page.name} · bubble ${index + 1} of ${page.tile_count}.`);
                   await api("/pages/" + page.id + "/recognize", {
-                    method: "POST",
-                    body: JSON.stringify({ token, tile }),
-                    signal: controller.signal,
+                    method: "POST", body: JSON.stringify({ token, index }), signal: controller.signal,
                   });
                 }
-              }
-              if (Number(page.metrics.layout_version || 0) < 2) {
-                setMessage(
-                  "Arranging dialogue on " +
-                    page.name +
-                    ". Keep this tab open.",
-                );
-                const { layoutGroups } = await import("@/lib/page-layout");
-                const { canvasOf } = await import("@/lib/browser-pages");
-                const latest = await api<Region[]>(
-                  "/pages/" + page.id + "/regions",
-                  { signal: controller.signal },
-                );
-                const surface = canvasOf(bitmap.width, bitmap.height);
-                const context = surface.getContext("2d", {
-                  willReadFrequently: true,
-                })!;
-                context.drawImage(bitmap, 0, 0);
-                const groups = layoutGroups(
-                  context.getImageData(0, 0, bitmap.width, bitmap.height),
-                  latest,
-                );
-                surface.width = surface.height = 0;
-                await api("/pages/" + page.id + "/prepare", {
-                  method: "POST",
-                  body: JSON.stringify({ token, groups }),
-                  signal: controller.signal,
-                });
               }
               setMessage("Translating " + page.name + "… Keep this tab open.");
               const { regions } = await api<{ regions: Region[] }>(

@@ -7,6 +7,9 @@ export type Page = {
   status: string;
   error: string;
   revision: number;
+  bubble_scan_status: "unscanned" | "scanning" | "failed" | "ready";
+  bubble_reviewed: boolean;
+  bubble_candidates: number;
   original: string;
   translated: string;
   thumbnail: string;
@@ -131,4 +134,4 @@ export const languages: Record<string, string> = {
   tl: "Filipino",
 };
 export const ready = (p: Page) =>
-  p.status === "completed" || p.status === "needs_review";
+  ["completed", "needs_review", "no_speech_bubbles", "no_bubbles_selected"].includes(p.status);

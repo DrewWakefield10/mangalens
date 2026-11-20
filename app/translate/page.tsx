@@ -3,6 +3,7 @@ import { useEffect, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import { useQuery } from "@tanstack/react-query";
 import * as Dialog from "@radix-ui/react-dialog";
+import { BubblePreview } from "@/components/bubble-preview";
 import {
   Upload,
   ArrowRight,
@@ -34,6 +35,7 @@ export default function Translate() {
   const [style, setStyle] = useState(prefs.style);
   const [provider, setProvider] = useState("deepl");
   const [direction, setDirection] = useState("rtl");
+  const [bubblesReady, setBubblesReady] = useState(false);
   const [previews, setPreviews] = useState<string[]>([]);
   const {
     data: health,
@@ -346,13 +348,13 @@ export default function Translate() {
       <Dialog.Root
         open={!!project}
         onOpenChange={(open) => {
-          if (!open) setProject(null);
+          if (!open) { setProject(null); setBubblesReady(false); }
         }}
       >
         <Dialog.Portal>
           <Dialog.Overlay className="modal-overlay" />
-          <Dialog.Content className="modal">
-            <Dialog.Title>One last look at your chapter.</Dialog.Title>
+          <Dialog.Content className="modal bubble-modal">
+            <Dialog.Title>Preview Detected Bubbles</Dialog.Title>
             <Dialog.Description>
               Set the reading order and translation preferences. Your imported
               project is already saved.
@@ -515,17 +517,13 @@ export default function Translate() {
                     before starting.
                   </p>
                 )}
-                <p className="hint">
-                  {health?.execution_mode === "browser"
-                    ? "OCR.space receives page images and DeepL receives recognized dialogue. This tab coordinates processing and renders each result. Closing it pauses unfinished work; reopen the chapter to resume. Review recognized text and cleanup before exporting."
-                    : "DeepL translates recognized dialogue using nearby text for context. Maximum Quality runs local OCR recovery. Configured OCR.space receives page images. Review uncertain regions before exporting."}
-                </p>
+                <BubblePreview projectId={project.id} pages={project.pages} onReady={setBubblesReady} />
                 {error && (
                   <div role="alert" className="error">
                     {error}
                   </div>
                 )}
-                <Button disabled={busy || missingModel} onClick={start}>
+                <Button disabled={busy || missingModel || !bubblesReady} onClick={start}>
                   {busy ? "Starting…" : "Translate Chapter"}
                   <ArrowRight size={17} />
                 </Button>

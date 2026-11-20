@@ -14,11 +14,12 @@ credential internally and accepts a separate random bearer token from Vercel.
 Only the SHA-256 of that token is embedded in its deployed source.
 
 Images upload directly to signed Supabase URLs, avoiding Vercel's function
-payload limit. The browser decodes imports, creates overlapping JPEG OCR tiles,
-renders conservative white-background cleanup and translated text, and generates
+payload limit. The API detects speech bubble outlines before recognition. Once
+selections are saved and translation starts, the API creates masked crops from the
+stored originals. The browser renders conservative cleanup and translated text and generates
 ZIP/CBZ/PDF exports. Original PNG files remain separate.
 
-The browser saves progress after each recognized tile and each translated page.
+The browser saves progress after each recognized bubble and each translated page.
 A five-minute page lease and optimistic document versions reject competing tabs
 and stale editor saves. Resume keeps saved text and translations. Failed or
 uncertain external requests count against the budget. An interrupted provider
@@ -52,11 +53,11 @@ the same four server values. Local development otherwise uses the Python API.
 - At most 20 stored pages across all browser sessions, 10 chapters per session,
   20 pages per import, 64 MiB input and 128 MiB expanded archive.
 - At most 12 megapixels per page and 8 MiB per normalized PNG.
-- Global OCR budget: 50 attempted tiles/day, 400/month, including at most
+- Global OCR budget: 50 attempted crops/day, 400/month, including at most
   300 Engine 3 attempts/month. Every retry counts; no automatic paid fallback.
 - Global DeepL budget: 100,000 submitted characters/month. The provider's own
   quota and rate limits also apply, including usage outside MangaLens.
-- Every output is marked for manual review. OCR.space supplies no confidence
+- Automatically recognized output remains available for manual review. OCR.space supplies no confidence
   scores. Complex backgrounds are preserved unless the user verifies an
   explicit mask. Text that cannot fit at 12px preserves original lettering.
 - Projects expire after seven days. Library access removes expired files and

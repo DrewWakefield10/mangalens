@@ -125,6 +125,13 @@ def build_text_mask(array, region):
     )
     if polygon:
         ink, _, protected = text_components(gray, polygon_mask(gray.shape, polygon))
+        if opts.get("bubble_version"):
+            accounted = source.copy()
+            for box in opts.get("mask_include", []) + opts.get("mask_exclude", []):
+                accounted |= rect_mask(gray.shape, box)
+            unaccounted = (ink > 0) & (interior > 0) & (accounted == 0)
+            if np.count_nonzero(unaccounted) > 12:
+                return None, "Lettering remains beyond the OCR selection. Check the source lettering box."
         ink = cv2.bitwise_and(ink, source)
     else:
         # Connected components protect long panel rules; manual exclusions can
@@ -237,6 +244,9 @@ def render_page(original, regions, cache_path=None):
         opts.pop("actual_font_size", None)
         opts.pop("cleanup_cache_hit", None)
         r.render = opts
+        if opts.get("boundary_crossing"):
+            notices[r.id].append("Bubble boundary cuts through lettering. Edit Bubble Boundary.")
+            continue
         if r.restored:
             opts["state"] = "restored"
             continue
@@ -283,11 +293,20 @@ def render_page(original, regions, cache_path=None):
         if opts.get("translation_quality"):
             notices[r.id].extend(opts["translation_quality"])
             continue
-        if any(ord(c) not in glyphs() for c in r.translation if not c.isspace()):
+        try:
+            available_glyphs = glyphs()
+        except (OSError, ValueError):
+            notices[r.id].append("Typesetting font is unavailable. Original bubble preserved.")
+            continue
+        if any(ord(c) not in available_glyphs for c in r.translation if not c.isspace()):
             notices[r.id].append("Missing font glyphs; original region preserved.")
             continue
-        area = usable_area(original, r)
-        layout = fit_text(original, r, area)
+        try:
+            area = usable_area(original, r)
+            layout = fit_text(original, r, area)
+        except (OSError, ValueError, cv2.error):
+            notices[r.id].append("Typesetting could not validate this bubble. Original preserved.")
+            continue
         if not layout:
             notices[r.id].append(
                 "Translation does not fit inside the safe region at 12px; original preserved."
@@ -306,11 +325,14 @@ def render_page(original, regions, cache_path=None):
     for r in regions:
         opts = dict(r.render or {})
         opts["mask_applied_pixels"] = 0
-        if r.restored or opts.get("source_is_target") or (hasattr(r, "source_text") and not r.source_text.strip()):
+        if r.restored or opts.get("boundary_crossing") or opts.get("source_is_target") or (hasattr(r, "source_text") and not r.source_text.strip()):
             opts.update(mask_status="not_applicable", mask_candidate_pixels=0, mask_failure_reason="")
         else:
             record(opts, "MASK_PENDING")
-            proposal, reason = build_text_mask(array, r)
+            try:
+                proposal, reason = build_text_mask(array, r)
+            except (ValueError, cv2.error):
+                proposal, reason = None, "The lettering mask could not be verified. Original preserved."
             if proposal is None:
                 opts.update(mask_status="failed", mask_candidate_pixels=0, mask_failure_reason=reason)
                 record(opts, "MASK_FAILED", reason)
@@ -325,6 +347,7 @@ def render_page(original, regions, cache_path=None):
     # Cleanup excludes translation and typography. Per-region signatures let a
     # mask retry reuse every other successfully cleaned region.
     original_digest = hashlib.sha256(array.tobytes()).hexdigest()
+    cache_version = "cleanup-v7"
     region_ids = {r.id: index + 1 for index, r in enumerate(regions)}
     signatures = {}
     for r in regions:
@@ -332,14 +355,14 @@ def render_page(original, regions, cache_path=None):
             continue
         opts = r.render or {}
         signature_input = [
-            region_ids[r.id], r.box, r.words,
+            region_ids[r.id], r.box, r.words, r.id in candidate_masks,
             {k: opts.get(k) for k in (
                 "source_box", "bubble_polygon", "mask_include", "mask_exclude",
                 "mask_dilation", "mask_revision",
             )},
         ]
         signatures[r.id] = hashlib.sha256(json.dumps(signature_input, sort_keys=True).encode()).hexdigest()
-    key = hashlib.sha256(json.dumps(["cleanup-v6", original_digest, signatures], sort_keys=True).encode()).hexdigest()
+    key = hashlib.sha256(json.dumps([cache_version, original_digest, signatures], sort_keys=True).encode()).hexdigest()
     loaded = False
     reused_ids = set()
     recompute_ids = set(layouts)
@@ -348,7 +371,9 @@ def render_page(original, regions, cache_path=None):
     if cache_path and cache_path.with_suffix(".json").exists():
         try:
             metadata = json.loads(cache_path.with_suffix(".json").read_text())
-            if metadata.get("original_digest") == original_digest and metadata.get("region_ids") == region_ids:
+            if (metadata.get("version") == cache_version
+                    and metadata.get("original_digest") == original_digest
+                    and metadata.get("region_ids") == region_ids):
                 clean_array = np.array(
                     Image.open(cache_path.with_suffix(".clean.png")).convert("RGB")
                 )
@@ -399,7 +424,11 @@ def render_page(original, regions, cache_path=None):
             if r.id not in candidate_masks:
                 cleanup_notices[r.id] = [r.render.get("mask_failure_reason") or "No safe text mask is available."]
                 continue
-            cleaned, region_mask, notes = clean_region(array, r, areas[r.id], candidate_masks[r.id])
+            try:
+                cleaned, region_mask, notes = clean_region(array, r, areas[r.id], candidate_masks[r.id])
+            except (ValueError, cv2.error):
+                cleanup_notices[r.id] = ["Bubble cleanup could not be verified. Original preserved."]
+                continue
             cleanup_notices[r.id] = notes
             if cleaned is None:
                 continue
@@ -455,13 +484,15 @@ def render_page(original, regions, cache_path=None):
         elif not r.restored:
             opts["state"] = "needs_review"
             reason = notices[r.id][0] if notices[r.id] else "Region was not rendered"
-            if hasattr(r, "source_text") and not r.source_text.strip():
+            if opts.get("boundary_crossing"):
+                record(opts, "NEEDS_MANUAL_REVIEW", reason)
+            elif hasattr(r, "source_text") and not r.source_text.strip():
                 record(opts, "OCR_FAILED", reason)
             elif r.id in layouts and opts.get("mask_status") == "failed":
                 record(opts, "MASK_FAILED", opts.get("mask_failure_reason") or reason)
             elif r.id in layouts:
                 record(opts, "INPAINTING_FAILED", reason)
-            elif "fit" in reason or "glyph" in reason:
+            elif "fit" in reason or "glyph" in reason or "font" in reason or "Typesetting" in reason:
                 record(opts, "RENDERING_FAILED", reason)
             elif opts.get("translation_error"):
                 record(opts, "TRANSLATION_FAILED", reason)
@@ -487,7 +518,7 @@ def render_page(original, regions, cache_path=None):
             temporary.replace(target)
         temporary = cache_path.with_suffix(".json.tmp")
         temporary.write_text(json.dumps({
-            "key": key, "original_digest": original_digest,
+            "version": cache_version, "key": key, "original_digest": original_digest,
             "region_ids": region_ids, "signatures": signatures,
             "notices": cleanup_notices, "successful": successful,
         }))

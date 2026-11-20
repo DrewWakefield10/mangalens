@@ -54,6 +54,8 @@ Panels use the existing 14px radius; controls use 8px. The manga page itself rem
 
 Canonical actions use `components/ui/button.tsx`. Native labeled checkboxes use `.check-field`, including the session-local Show region boxes setting. Current stage results and chronological history share the existing `.region-diagnostics` disclosure. Settings reports server commitments separately from provider-confirmed usage.
 
+Bubble review reuses the Radix dialog, native page select, and original page image with a polygon overlay. Solid lavender outlines mark selected bubbles. Dashed amber outlines mark unconfirmed candidates. The adjacent list repeats each state in text and provides keyboard selection. The drawing canvas supports keyboard placement of boundary points.
+
 ## Do's and Don'ts
 
 - Preserve stable region selection when overlays are hidden.

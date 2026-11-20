@@ -194,7 +194,7 @@ export async function projectDto(doc: Document<CloudProject>, who: string) {
     ...doc.data,
     execution_mode: "browser",
     pages,
-    ready: pages.filter((p) => ["completed", "needs_review"].includes(p.status))
+    ready: pages.filter((p) => ["completed", "needs_review", "no_speech_bubbles", "no_bubbles_selected"].includes(p.status))
       .length,
     active: pages.some((p) =>
       ["queued", "processing", "rendering"].includes(p.status),
@@ -205,6 +205,10 @@ export function pageDto(p: CloudPage) {
   const base = "/api/pages/" + p.id + "/image/";
   return {
     ...p,
+    bubble_scan_status: p.bubble_scan?.status || "unscanned",
+    bubble_reviewed: !!p.bubble_scan?.reviewed,
+    bubble_candidates: p.bubble_scan?.bubbles.length || 0,
+    bubble_scan: undefined,
     lease: undefined,
     assets: undefined,
     garbage: undefined,

@@ -52,6 +52,7 @@ test("offline import blocks a missing language pair before processing", async ({
     await page
       .getByRole("combobox", { name: "Translate into", exact: true })
       .selectOption("en");
+    await page.getByRole("button", { name: "Save page selection" }).click();
     await expect(
       page.getByRole("button", { name: "Translate Chapter" }),
     ).toBeEnabled();
@@ -110,6 +111,9 @@ test("real Japanese upload, worker, reader, editor and export", async ({
     .selectOption("ja");
   await page.getByRole("combobox", { name: "Processing profile" }).selectOption("balanced");
   await page.getByRole("combobox", { name: "Translation provider" }).selectOption("argos");
+  await expect(page.getByRole("dialog", { name: "Preview Detected Bubbles" })).toBeVisible();
+  await expect(page.getByRole("button", { name: "Translate Chapter" })).toBeDisabled();
+  await page.getByRole("button", { name: "Save page selection" }).click();
   await page.getByRole("button", { name: "Translate Chapter" }).click();
   await expect(page).toHaveURL(/\/projects\/[a-f0-9]+$/);
   const id = page.url().split("/").pop()!;
@@ -180,19 +184,29 @@ test("manual region drawing, OCR, correction and clean preview", async ({
   await page.getByRole("button", { name: "Preview chapter" }).click();
   const project = await (await response).json();
   try {
+    const dialog = page.getByRole("dialog", { name: "Preview Detected Bubbles" });
+    await dialog.getByRole("combobox", { name: "Source language", exact: true }).selectOption("ja");
+    await dialog.getByRole("combobox", { name: "Translation provider" }).selectOption("argos");
+    await expect(dialog.locator(".bubble-outline.approved")).toHaveCount(1);
+    await dialog.locator(".bubble-canvas").scrollIntoViewIfNeeded();
+    await page.screenshot({ path: "data/qa/bubble-preview/browser.png" });
+    await dialog.getByRole("button", { name: "Deselect bubble" }).click();
+    await expect(dialog.getByText("No Bubbles Selected", { exact: true })).toBeVisible();
+    await expect(dialog.getByRole("button", { name: "Translate Chapter" })).toBeDisabled();
+    await dialog.getByRole("button", { name: "Outline missed bubble" }).click();
+    const canvas = dialog.locator(".bubble-canvas svg");
+    const size = (await canvas.boundingBox())!;
+    for (const [x, y] of [[0.19, 0.19], [0.81, 0.19], [0.81, 0.39], [0.19, 0.39]]) {
+      await canvas.click({ position: { x: size.width * x, y: size.height * y } });
+    }
+    await dialog.getByRole("button", { name: "Close outline" }).click();
+    await expect(dialog.getByText("Needs Review", { exact: true })).toBeVisible();
+    await dialog.getByRole("button", { name: "Confirm speech bubble" }).click();
+    await dialog.getByRole("button", { name: "Save page selection" }).click();
+    await dialog.getByRole("button", { name: "Translate Chapter" }).click();
+    await expect(page).toHaveURL(/\/projects\/[a-f0-9]+$/);
     await page.goto("/editor/" + project.id);
-    await page
-      .getByRole("button", { name: "Add Text Region", exact: true })
-      .click();
     const image = page.locator(".editor-image-wrap > img");
-    await expect(image).toBeVisible();
-    const b = (await image.boundingBox())!;
-    await page.mouse.move(b.x + b.width * 0.05, b.y + b.height * 0.06);
-    await page.mouse.down();
-    await page.mouse.move(b.x + b.width * 0.95, b.y + b.height * 0.46, {
-      steps: 12,
-    });
-    await page.mouse.up();
     await expect(page.getByLabel("Recognized source")).not.toHaveValue("", {
       timeout: 90000,
     });
@@ -206,9 +220,11 @@ test("manual region drawing, OCR, correction and clean preview", async ({
       .toBeFalsy();
     await page.getByLabel("Recognized source").fill("今日はいい天気ですね。");
     await page.getByLabel("I verified the source text").check();
+    const savedResponse = page.waitForResponse(r => r.url().includes("/api/regions/") && r.request().method() === "PUT");
     await page
       .getByRole("button", { name: "Save changes", exact: true })
       .click();
+    expect((await savedResponse).ok()).toBeTruthy();
     await expect
       .poll(
         async () =>
@@ -217,7 +233,9 @@ test("manual region drawing, OCR, correction and clean preview", async ({
         { timeout: 30000 },
       )
       .toBeFalsy();
+    const translationResponse = page.waitForResponse(r => r.url().endsWith("/retranslate") && r.request().method() === "POST");
     await page.getByRole("button", { name: "Retranslate saved text" }).click();
+    expect((await translationResponse).ok()).toBeTruthy();
     await expect(
       page.getByRole("textbox", { name: "Translation", exact: true }),
     ).toHaveValue(/\S.{4,}/, { timeout: 30000 });

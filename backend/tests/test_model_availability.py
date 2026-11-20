@@ -3,7 +3,7 @@ from sqlalchemy import select
 from app.config import settings
 from app.db import DB, Job, Page
 from app.translation import offline_pairs, validate_offline_pair
-from test_api import upload
+from test_api import scan_and_confirm, upload
 import pytest
 
 
@@ -46,6 +46,7 @@ def test_missing_pair_never_queues_pages(client, monkeypatch, tmp_path):
         assert db.scalars(select(Job)).all() == []
         assert db.get(Page, project["pages"][0]["id"]).status == "imported"
     install_fixture(tmp_path, "en_ja")
+    scan_and_confirm(client, project)
     assert (
         client.post(
             f"/api/projects/{project['id']}/start",

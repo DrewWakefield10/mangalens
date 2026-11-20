@@ -22,7 +22,7 @@ from fastapi import (
 from fastapi.responses import FileResponse, StreamingResponse
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
-from sqlalchemy import delete, select, text
+from sqlalchemy import delete, select, text, update
 from sqlalchemy.orm import Session as DBSession
 from sqlalchemy.exc import IntegrityError
 from PIL import Image
@@ -55,6 +55,7 @@ from .translation import (
 from .deepl_client import account_usage, DeepLError
 from .rendering import build_text_mask
 from .limits import BodyLimitMiddleware
+from .bubbles import VERSION, eligible, fingerprint, intersect, mark_scan_failed, scan_for, validate_polygon
 
 app = FastAPI(
     title="MangaLens API",
@@ -179,6 +180,7 @@ def serialize_region(r):
 
 
 def serialize_page(p):
+    scan = scan_for(p)
     return {
         **{
             k: getattr(p, k)
@@ -194,6 +196,9 @@ def serialize_page(p):
                 "metrics",
             )
         },
+        "bubble_scan_status": scan.get("status", "unscanned"),
+        "bubble_reviewed": bool(scan.get("reviewed")),
+        "bubble_candidates": len(scan.get("bubbles", [])),
         "original": f"/api/pages/{p.id}/image/original",
         "thumbnail": f"/api/pages/{p.id}/image/thumbnail",
         "translated": f"/api/pages/{p.id}/image/translated?v={p.revision}",
@@ -223,7 +228,7 @@ def serialize_project(db, p):
             )
         },
         "pages": [serialize_page(page) for page in pages],
-        "ready": sum(page.status in ("completed", "needs_review") for page in pages),
+        "ready": sum(page.status in ("completed", "needs_review", "no_speech_bubbles", "no_bubbles_selected") for page in pages),
         "active": bool(active(db, p.id)),
     }
 
@@ -427,6 +432,111 @@ async def events(project_id: str, session=Depends(owner), db=Depends(database)):
     )
 
 
+class BubbleScanRequest(BaseModel):
+    page_ids: list[str] | None = Field(default=None, max_length=100)
+
+
+@app.post("/api/projects/{project_id}/bubble-scans")
+def scan_project(project_id: str, body: BubbleScanRequest, session=Depends(owner), db=Depends(database)):
+    project = project_for(db, project_id, session)
+    if active(db, project.id):
+        return serialize_project(db, project)
+    pages = list(db.scalars(select(Page).where(Page.project_id == project.id).order_by(Page.position)))
+    wanted = set(body.page_ids) if body.page_ids is not None else {page.id for page in pages}
+    if wanted - {page.id for page in pages}:
+        raise HTTPException(404, "Page not found.")
+    project.cancelled = False
+    for page in pages:
+        if page.id not in wanted or scan_for(page).get("status") == "ready":
+            continue
+        page.metrics = {**page.metrics, "bubble_scan": {
+            "version": VERSION, "digest": page.digest, "status": "scanning", "bubbles": [],
+        }}
+        db.add(Job(page_id=page.id, kind="bubble_scan"))
+    db.commit()
+    return serialize_project(db, project)
+
+
+@app.get("/api/pages/{page_id}/bubbles")
+def bubbles(page_id: str, session=Depends(owner), db=Depends(database)):
+    page, _ = page_for(db, page_id, session)
+    return scan_for(page) or {"status": "unscanned", "bubbles": []}
+
+
+class BubbleChoice(BaseModel):
+    id: str | None = Field(default=None, max_length=32)
+    polygon: list[tuple[int, int]] = Field(min_length=3, max_length=120)
+    decision: Literal["approved", "dismissed", "pending"]
+    confirmed: bool = False
+
+
+class BubbleReview(BaseModel):
+    revision: str
+    bubbles: list[BubbleChoice] = Field(max_length=100)
+    skip: bool = False
+
+
+@app.put("/api/pages/{page_id}/bubbles")
+def review_bubbles(page_id: str, body: BubbleReview, session=Depends(owner), db=Depends(database)):
+    page, project = page_for(db, page_id, session)
+    scan = scan_for(page)
+    if (scan.get("status") != "ready" or scan.get("revision") != body.revision
+            or db.scalar(select(Job.id).where(Job.page_id == page.id,
+                                              Job.status.in_(("queued", "running"))).limit(1))):
+        raise HTTPException(409, "The bubble scan changed. Reopen the preview and try again.")
+    previous = {item["id"]: item for item in scan["bubbles"]}
+    choices = []
+    seen = set()
+    for choice in body.bubbles:
+        if choice.id is not None and (choice.id not in previous or choice.id in seen):
+            raise HTTPException(422, "Bubble selections must refer to distinct candidates on this page.")
+        saved = previous.get(choice.id)
+        points = [list(point) for point in choice.polygon]
+        adjusted = not saved or saved["polygon"] != points
+        if choice.decision == "approved" and (adjusted or saved["decision"] == "pending") and not choice.confirmed:
+            raise HTTPException(422, "Confirm the speech bubble boundary before including it.")
+        try:
+            box = validate_polygon(points, page.width, page.height)
+        except ValueError as exc:
+            raise HTTPException(422, str(exc)) from exc
+        if choice.id:
+            seen.add(choice.id)
+        choices.append({
+            "id": choice.id or uid(), "polygon": points, "box": box,
+            "detection": "manual" if adjusted else saved["detection"],
+            "decision": choice.decision,
+            "reason": "" if adjusted else saved["reason"],
+        })
+    if seen != set(previous):
+        raise HTTPException(422, "Keep each detected candidate and deselect any you want to exclude.")
+    selected = [item for item in choices if item["decision"] == "approved"]
+    if any(intersect(item, other) for i, item in enumerate(selected) for other in selected[:i]):
+        raise HTTPException(422, "Approved bubble boundaries cannot overlap.")
+    if body.skip and (selected or any(item["decision"] == "pending" for item in choices)):
+        raise HTTPException(422, "Dismiss every candidate before skipping this page.")
+    scan = {**scan, "bubbles": choices, "reviewed": bool(selected) or not choices or body.skip,
+            "skipped": body.skip, "revision": uid()}
+    saved = db.execute(update(Page).where(
+        Page.id == page.id,
+        Page.metrics["bubble_scan"]["revision"].as_string() == body.revision,
+    ).values(metrics={**page.metrics, "bubble_scan": scan}))
+    if not saved.rowcount:
+        raise HTTPException(409, "The bubble selection changed. Reopen the preview and try again.")
+    db.commit()
+    return scan
+
+
+def require_bubble_review(page):
+    scan = scan_for(page)
+    if scan.get("status") != "ready" or not scan.get("reviewed"):
+        raise HTTPException(409, "Preview Detected Bubbles and confirm the page selection before processing.")
+
+
+def require_approved_region(page, region):
+    if not eligible(page, region):
+        raise HTTPException(409, "This region is outside the approved speech bubbles. Open the bubble preview.")
+
+
 class Start(BaseModel):
     source_lang: Literal["auto", "ja", "ko", "zh-CN", "zh-TW", "ru", "en"] = "auto"
     target_lang: Literal[
@@ -474,7 +584,8 @@ def start(project_id: str, body: Start, session=Depends(owner), db=Depends(datab
         len(body.order) != len(pages) or set(body.order) != {x.id for x in pages}
     ):
         raise HTTPException(422, "Page order must include each page exactly once.")
-    changed_source = p.source_lang != body.source_lang
+    for page in pages:
+        require_bubble_review(page)
     previous_target = p.target_lang
     if previous_target != body.target_lang:
         for r in db.scalars(select(Region).join(Page).where(Page.project_id == p.id)):
@@ -490,8 +601,8 @@ def start(project_id: str, body: Start, session=Depends(owner), db=Depends(datab
     for page in pages:
         if body.order:
             page.position = body.order.index(page.id)
-        if changed_source:
-            page.metrics = {**page.metrics, "pipeline_version": 0}
+        metrics = {key: value for key, value in page.metrics.items() if key != "ocr_source_override"}
+        page.metrics = metrics
         page.status = "queued"
         page.error = ""
         db.add(Job(page_id=page.id, created=time.time() + page.position * 0.001))
@@ -507,18 +618,23 @@ def cancel(project_id: str, session=Depends(owner), db=Depends(database)):
         select(Job).join(Page).where(Page.project_id == p.id, Job.status == "queued")
     ):
         job.status = "cancelled"
-        db.get(Page, job.page_id).status = "cancelled"
+        page = db.get(Page, job.page_id)
+        if job.kind == "bubble_scan":
+            mark_scan_failed(page, "Bubble scan cancelled.")
+        else:
+            page.status = "cancelled"
     db.commit()
     return {"cancelled": True}
 
 
 @app.post("/api/pages/{page_id}/retry")
-def retry(page_id: str, session=Depends(owner), db=Depends(database)):
+def retry(page_id: str, changed_only: bool = False, session=Depends(owner), db=Depends(database)):
     page, p = page_for(db, page_id, session)
     if active(db, p.id):
         raise HTTPException(
             409, "Wait for active processing to finish before retrying."
         )
+    require_bubble_review(page)
     if p.provider == "argos":
         try:
             validate_offline_pair(p.source_lang, p.target_lang)
@@ -527,7 +643,7 @@ def retry(page_id: str, session=Depends(owner), db=Depends(database)):
     p.cancelled = False
     page.status = "queued"
     page.error = ""
-    db.add(Job(page_id=page.id))
+    db.add(Job(page_id=page.id, kind="bubble_update" if changed_only else "translate"))
     db.commit()
     return {"queued": True}
 
@@ -542,7 +658,7 @@ def image(
 ):
     page, p = page_for(db, page_id, session)
     if kind in ("translated", "clean", "mask"):
-        if page.status not in ("completed", "needs_review"):
+        if page.status not in ("completed", "needs_review", "no_speech_bubbles", "no_bubbles_selected"):
             raise HTTPException(404, "This image is not ready yet.")
         if v is not None and v != page.revision:
             raise HTTPException(409, "Image revision changed. Refresh the page to load the current views.")
@@ -564,7 +680,8 @@ def mask_candidate(
     if region is None:
         raise HTTPException(404, "Region not found.")
     page, project = page_for(db, region.page_id, session)
-    if page.status not in ("completed", "needs_review"):
+    require_approved_region(page, region)
+    if page.status not in ("completed", "needs_review", "no_speech_bubbles", "no_bubbles_selected"):
         raise HTTPException(404, "This preview is not ready yet.")
     if v is not None and v != page.revision:
         raise HTTPException(409, "Image revision changed. Refresh the page to load the current views.")
@@ -639,36 +756,8 @@ class RegionCreate(BaseModel):
 def add_region(
     page_id: str, body: RegionCreate, session=Depends(owner), db=Depends(database)
 ):
-    page, p = page_for(db, page_id, session)
-    if active(db, p.id):
-        raise HTTPException(409, "Wait for processing before adding a region.")
-    check_box(body.box, page)
-    existing = list(db.scalars(select(Region).where(Region.page_id == page.id)))
-    if len(existing) >= 100:
-        raise HTTPException(422, "Maximum 100 regions per page.")
-    r = Region(
-        page_id=page.id,
-        position=len(existing),
-        box=body.box,
-        words=[body.box],
-        source_text="",
-        language=body.language,
-        confidence=0,
-        render={
-            "manual": True,
-            "source_box": body.box,
-            "pending_ocr": body.run_ocr,
-            "pipeline_version": 2,
-            "state": "detected",
-        },
-        warnings=["Review the source text and translation."],
-    )
-    db.add(r)
-    db.add(Job(page_id=page.id, kind="ocr_region" if body.run_ocr else "render"))
-    p.cancelled = False
-    page.status = "queued"
-    db.commit()
-    return serialize_region(r)
+    page_for(db, page_id, session)
+    raise HTTPException(409, "Use Preview Detected Bubbles to outline and confirm a missed speech bubble.")
 
 
 class OCRRetry(BaseModel):
@@ -680,6 +769,7 @@ def retry_ocr(
     page_id: str, body: OCRRetry, session=Depends(owner), db=Depends(database)
 ):
     page, p = page_for(db, page_id, session)
+    require_bubble_review(page)
     if active(db, p.id):
         raise HTTPException(409, "Wait for processing before retrying OCR.")
     if body.source_lang:
@@ -698,6 +788,7 @@ def retry_region_ocr(region_id: str, session=Depends(owner), db=Depends(database
     if not r:
         raise HTTPException(404, "Region not found.")
     page, p = page_for(db, r.page_id, session)
+    require_approved_region(page, r)
     if active(db, p.id):
         raise HTTPException(409, "Wait for processing before retrying OCR.")
     r.render = {**r.render, "pending_ocr": True, "manual": True}
@@ -719,6 +810,7 @@ def retry_region_stage(
     if not r:
         raise HTTPException(404, "Region not found.")
     page, project = page_for(db, r.page_id, session)
+    require_approved_region(page, r)
     if active(db, project.id):
         raise HTTPException(409, "Wait for processing to finish.")
     options = dict(r.render or {})
@@ -742,6 +834,7 @@ def edit(
     if not r:
         raise HTTPException(404, "Region not found.")
     page, p = page_for(db, r.page_id, session)
+    require_approved_region(page, r)
     if active(db, p.id):
         raise HTTPException(409, "Wait for processing before editing.")
     if body.box:
@@ -788,6 +881,7 @@ def edit(
         ),
         "manual": True,
         "translation_target": p.target_lang,
+        "translation_settings": fingerprint(p.provider, p.target_lang, p.style, p.quality),
         "translation_error": "",
         "translation_quality": [],
         "source_is_target": body.language == p.target_lang and body.translation == body.source_text,
@@ -810,8 +904,13 @@ def retranslate(region_id: str, session=Depends(owner), db=Depends(database)):
     if not r:
         raise HTTPException(404, "Region not found.")
     page, p = page_for(db, r.page_id, session)
+    require_approved_region(page, r)
     if active(db, p.id):
         raise HTTPException(409, "Wait for processing to finish.")
+    if r.render.get("boundary_crossing") or not r.source_text.strip():
+        raise HTTPException(422, "Confirm the boundary and verify the source lettering before retranslating.")
+    if not r.render.get("source_verified") and (r.confidence < settings.ocr_min_confidence or r.render.get("ocr_uncertain")):
+        raise HTTPException(422, "Verify the recognized source text before retranslating.")
     glossary = {
         g.source: g.target
         for g in db.scalars(select(Glossary).where(Glossary.project_id == p.id))
@@ -822,13 +921,17 @@ def retranslate(region_id: str, session=Depends(owner), db=Depends(database)):
         neighbors = db.scalars(select(Region).where(Region.page_id == page.id)
                                .order_by(Region.position)).all()
         context = "\n".join(item.source_text for item in neighbors
-                            if item.id != r.id and item.source_text.strip())[-4000:]
+                            if item.id != r.id and eligible(page, item) and item.source_text.strip()
+                            and not item.render.get("boundary_crossing")
+                            and (item.render.get("source_verified") or item.confidence >= settings.ocr_min_confidence
+                                 and not item.render.get("ocr_uncertain")))[-4000:]
         source = "auto" if (p.provider == "deepl" and p.source_lang == "auto"
                             and not r.render.get("source_verified")
                             and r.render.get("language_confidence", 0) < 0.75) else r.language
         texts, provider, cached = cached_translate(
             db, session.id, [r.source_text], source, p, glossary, context,
             fallback_source=r.language, fallback_confidence=r.render.get("language_confidence", 0),
+            bubble_scope=[VERSION, page.digest, r.render["bubble_polygon"]],
         )
     except Exception as e:
         raise HTTPException(
@@ -843,6 +946,7 @@ def retranslate(region_id: str, session=Depends(owner), db=Depends(database)):
         "translation_target": p.target_lang,
         "translation_provider": provider,
         "translation_cached": cached,
+        "translation_settings": fingerprint(p.provider, p.target_lang, p.style, p.quality),
         "source_is_target": r.language == p.target_lang and r.translation == r.source_text,
         "translation_quality": quality_warnings(
             r.source_text, r.translation, p.target_lang
@@ -979,7 +1083,7 @@ def export(
     pages = list(
         db.scalars(select(Page).where(Page.project_id == p.id).order_by(Page.position))
     )
-    if any(page.status not in ("completed", "needs_review") for page in pages):
+    if any(page.status not in ("completed", "needs_review", "no_speech_bubbles", "no_bubbles_selected") for page in pages):
         raise HTTPException(409, "Every page must finish before chapter export.")
     buffer = io.BytesIO()
     if format == "pdf":

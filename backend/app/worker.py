@@ -8,6 +8,7 @@ from sqlalchemy import delete, select, update
 from .config import settings
 from .db import DB, Cache, Job, Page, Project, Session, UsageEvent
 from .storage import remove_project
+from .bubbles import mark_scan_failed
 
 
 def claim():
@@ -18,7 +19,10 @@ def claim():
         for job in expired:
             job.status = "queued" if job.attempts < 3 else "failed"
             page = db.get(Page, job.page_id)
-            if page:
+            if page and job.kind == "bubble_scan":
+                if job.status == "failed":
+                    mark_scan_failed(page, "Bubble scanner lease expired.")
+            elif page:
                 page.status = job.status
                 page.error = (
                     "Worker lease expired; retry limit reached."
@@ -94,9 +98,11 @@ def main():
             time.sleep(1)
             continue
         try:
+            with DB() as db:
+                scan = db.get(Job, job_id).kind == "bubble_scan"
             result = subprocess.run(
                 [sys.executable, "-m", "app.process", job_id],
-                timeout=settings.job_timeout,
+                timeout=min(30, settings.job_timeout) if scan else settings.job_timeout,
             )
             if result.returncode:
                 raise RuntimeError("Worker subprocess exited unexpectedly.")
@@ -107,7 +113,9 @@ def main():
                     job.status = "failed"
                     job.error = type(exc).__name__
                     page = db.get(Page, job.page_id)
-                    if page:
+                    if page and job.kind == "bubble_scan":
+                        mark_scan_failed(page, "Bubble detection timed out or the scanner exited.")
+                    elif page:
                         page.status = "failed"
                         page.error = (
                             "Processing timed out or worker exited; retry this page."

@@ -1,4 +1,19 @@
-import { prepareRegions, type LayoutGroup } from "@/lib/page-layout";
+import { ordered, union } from "@/lib/page-layout";
+import {
+  approved,
+  BUBBLE_VERSION,
+  polygonBox,
+  polygonRows,
+} from "@/lib/bubble-geometry";
+import {
+  configureBubbles,
+  maskedTile,
+  requireReview,
+  saveReview,
+  scanBubbles,
+  validRegion,
+  verifyApprovedPixels,
+} from "@/lib/cloud-bubbles";
 import { randomUUID } from "node:crypto";
 import { NextRequest, NextResponse } from "next/server";
 import type { Region } from "@/lib/api";
@@ -26,12 +41,7 @@ import {
   verifyPng,
   cleanup,
 } from "@/lib/cloud-store";
-import {
-  overlap,
-  recognize,
-  translate,
-  type Tile,
-} from "@/lib/cloud-providers";
+import { recognize, translate } from "@/lib/cloud-providers";
 export const runtime = "nodejs";
 export const maxDuration = 300;
 export const dynamic = "force-dynamic";
@@ -268,6 +278,35 @@ async function handler(req: NextRequest, ctx: Context) {
           201,
         );
       }
+      if (parts[2] === "bubble-scans" && method === "POST") {
+        const input = await body(req);
+        const pages = await list<CloudPage>(who, "page", id);
+        const requested =
+          input.page_ids == null
+            ? pages.map((item) => item.id)
+            : input.page_ids;
+        if (
+          !Array.isArray(requested) ||
+          requested.some((pageId) => !pages.some((item) => item.id === pageId))
+        )
+          fail(404, "Page not found.");
+        for (const item of pages) {
+          if (
+            !requested.includes(item.id) ||
+            (item.data.bubble_scan?.version === BUBBLE_VERSION &&
+              item.data.bubble_scan.status === "ready")
+          )
+            continue;
+          const scan = await scanBubbles(item.data);
+          await mutate<CloudPage>(
+            item.id,
+            who,
+            (page) => ({ ...page, bubble_scan: scan }),
+            item.version,
+          );
+        }
+        return json(await projectDto(project, who));
+      }
       if (parts[2] === "start" && method === "POST") {
         const input = await body(req);
         if (input.provider && input.provider !== "deepl")
@@ -305,6 +344,13 @@ async function handler(req: NextRequest, ctx: Context) {
             input.order.some((v: string) => !pages.some((p) => p.id === v)))
         )
           fail(400, "The reading order must contain every page once.");
+        for (const item of pages) requireReview(item.data);
+        if (
+          pages.some(
+            (item) => item.data.lease && item.data.lease.until > Date.now(),
+          )
+        )
+          fail(409, "Pause processing before reviewing this chapter.");
         const changed =
           input.source_lang !== project.data.source_lang ||
           input.target_lang !== project.data.target_lang;
@@ -327,20 +373,13 @@ async function handler(req: NextRequest, ctx: Context) {
         }));
         for (const item of pages)
           await mutate<CloudPage>(item.id, who, (p) => {
-            // Resume completed work unless preferences changed. Explicit per-page retry reprocesses it.
-            if (changed) {
-              p.regions = [];
-              p.tiles_done = [];
-              p.tile_count = 0;
-              p.translated = false;
-            }
-            if (!["completed", "needs_review"].includes(p.status) || changed) {
-              p.status = "queued";
-              p.error = "";
-              p.lease = undefined;
-            }
+            if (changed) p.regions = [];
+            delete p.metrics.ocr_language;
             if (input.order) p.position = input.order.indexOf(p.id);
-            return p;
+            return configureBubbles(
+              p,
+              input.direction || project.data.direction,
+            );
           });
         return json(
           await projectDto(await document<CloudProject>(id, who), who),
@@ -370,6 +409,7 @@ async function handler(req: NextRequest, ctx: Context) {
           )
             continue;
           try {
+            requireReview(item.data);
             const claimed = await mutate<CloudPage>(
               item.id,
               who,
@@ -450,6 +490,22 @@ async function handler(req: NextRequest, ctx: Context) {
         who,
         "project",
       );
+      if (parts[2] === "bubbles") {
+        if (method === "GET")
+          return json(page.bubble_scan || { status: "unscanned", bubbles: [] });
+        if (method === "PUT") {
+          if (["queued", "processing", "rendering"].includes(page.status))
+            fail(409, "Pause processing before editing speech bubbles.");
+          const scan = saveReview(page, await body(req));
+          await mutate<CloudPage>(
+            page.id,
+            who,
+            (current) => ({ ...current, bubble_scan: scan }),
+            pageDoc.version,
+          );
+          return json(scan);
+        }
+      }
       if (parts[2] === "image" && method === "GET") {
         const kind = parts[3];
         if (
@@ -490,80 +546,42 @@ async function handler(req: NextRequest, ctx: Context) {
               render: { ...r.render, page_version: pageDoc.version },
             })),
           );
-        if (method === "POST") {
-          const input = await body(req);
-          if (page.lease && page.lease.until > Date.now())
-            fail(409, "Pause processing before adding a region.");
-          if (page.regions.length >= L.maxRegions)
-            fail(400, "This page already has 200 regions.");
-          const region: Region = {
-            id: randomUUID(),
-            page_id: page.id,
-            box: box(input.box, page),
-            source_text: "",
-            translation: "",
-            language: text(input.language || project.data.source_lang, 16),
-            confidence: 0,
-            orientation: "horizontal",
-            kind: "manual",
-            render: { source_verified: false },
-            warnings: [],
-            restored: false,
-          };
-          // Manual region creation preserves all existing source corrections.
-          await mutate<CloudPage>(page.id, who, (p) => ({
-            ...p,
-            regions: [...p.regions, region],
-            metrics: { ...p.metrics, layout_version: 0 },
-            status: "needs_review",
-          }));
-          return json(region, 201);
-        }
+        if (method === "POST")
+          fail(409, "Outline and confirm a speech bubble in the preview.");
       }
       if (["retry", "ocr", "rebuild"].includes(parts[2]) && method === "POST") {
+        requireReview(page);
         const options = parts[2] === "ocr" ? await body(req) : {};
-        const recoverySource = options.source_lang || project.data.source_lang;
         if (
-          parts[2] === "ocr" &&
+          options.source_lang &&
           !["auto", "ja", "en", "ko", "zh-CN", "zh-TW", "ru"].includes(
-            recoverySource,
+            options.source_lang,
           )
         )
           fail(400, "Choose a supported OCR language.");
+        await mutate<CloudPage>(
+          page.id,
+          who,
+          (p) => {
+            if (options.source_lang)
+              p.metrics.ocr_language = options.source_lang;
+            if (
+              parts[2] === "retry" &&
+              !req.nextUrl.searchParams.has("changed_only")
+            )
+              p.regions = p.regions.filter((r) => r.source_text || r.restored);
+            return configureBubbles(
+              p,
+              project.data.direction,
+              parts[2] === "ocr",
+            );
+          },
+          pageDoc.version,
+        );
         await mutate<CloudProject>(project.id, who, (p) => ({
           ...p,
           cancelled: false,
         }));
-        await mutate<CloudPage>(page.id, who, (p) => {
-          if (p.lease && p.lease.until > Date.now())
-            fail(
-              409,
-              "Wait for this page to finish or pause the chapter first.",
-            );
-          if (parts[2] === "ocr") {
-            p.metrics.ocr_language = recoverySource;
-            p.regions = p.regions.filter(
-              (r) =>
-                r.kind === "manual" ||
-                r.restored ||
-                r.render.user_edited ||
-                r.render.source_verified,
-            );
-            p.tiles_done = [];
-            p.tile_count = 0;
-            p.translated = false;
-            p.metrics.layout_version = 0;
-          }
-          if (parts[2] === "rebuild") {
-            p.metrics.layout_version = 0;
-            p.translated = false;
-          }
-          // Resume retains checkpoints; an explicit OCR retry preserves manual corrections.
-          p.status = "queued";
-          p.error = "";
-          p.lease = undefined;
-          return p;
-        });
         return json({ ok: true });
       }
       const input = method === "POST" ? await body(req) : {};
@@ -578,180 +596,178 @@ async function handler(req: NextRequest, ctx: Context) {
         ].includes(parts[2])
       ) {
         lease(page, input.token);
+        requireReview(page);
         if (project.data.cancelled) fail(409, "This chapter was paused.");
         if (parts[2] === "recognize" && method === "POST") {
-          const tile = input.tile as Tile;
-          if (
-            !tile ||
-            typeof tile.base64 !== "string" ||
-            tile.base64.length > 1_340_000 ||
-            !/^[A-Za-z0-9+/]*={0,2}$/.test(tile.base64)
-          )
-            fail(400, "Invalid OCR image tile.");
-          integer(tile.count, 1, L.maxTiles);
-          integer(tile.index, 0, tile.count - 1);
-          integer(tile.x, 0, page.width - 1);
-          integer(tile.y, 0, page.height - 1);
-          integer(tile.width, 1, page.width - tile.x);
-          integer(tile.height, 1, page.height - tile.y);
-          if (page.tile_count && page.tile_count !== tile.count)
-            fail(409, "OCR tiling changed. Retry with the saved page.");
-          if (page.tiles_done.includes(tile.index)) return json({ ok: true });
-          await mutate<CloudPage>(page.id, who, (p) => {
-            lease(p, input.token);
-            const attempts = Number(p.metrics.ocr_requests || 0);
-            if (attempts >= L.maxTiles)
-              fail(
-                429,
-                "This page reached its 12-attempt OCR budget. Edit missing text manually.",
+          requireReview(page);
+          const index = integer(input.index, 0, page.tile_count - 1);
+          const ids = page.metrics.bubble_order as string[];
+          const bubble = approved(page.bubble_scan).find(
+            (item) => item.id === ids?.[index],
+          );
+          if (!bubble) return fail(409, "Approved bubble selection changed.");
+          if (page.tiles_done.includes(index)) return json({ ok: true });
+          const outline = polygonRows(bubble.polygon);
+          let error = "";
+          let detected: Region[] = [];
+          let crossing = false;
+          try {
+            const tile = await maskedTile(page, bubble, index);
+            if (!tile) {
+              crossing = true;
+              error =
+                "Bubble boundary cuts through lettering. Edit Bubble Boundary.";
+            } else {
+              await mutate<CloudPage>(
+                page.id,
+                who,
+                (p) => {
+                  lease(p, input.token);
+                  const attempts = Number(p.metrics.ocr_requests || 0);
+                  if (attempts >= L.maxTiles)
+                    fail(429, "This page reached its OCR request budget.");
+                  p.metrics.ocr_requests = attempts + 1;
+                  return p;
+                },
+                pageDoc.version,
               );
-            p.metrics.ocr_requests = attempts + 1;
-            return p;
-          });
-          const regions = await recognize(tile, who, page, project.data);
+              detected = await recognize(tile, who, page, project.data);
+              const outside = detected.some((r) => {
+                const [x, y, w, h] = r.box;
+                return !outline.contains(
+                  Math.floor(x + w / 2),
+                  Math.floor(y + h / 2),
+                );
+              });
+              if (outside || !detected.length) {
+                error = outside
+                  ? "OCR returned lettering beyond the selection. Check the bubble boundary."
+                  : "OCR could not read the lettering. Retry OCR or verify a transcription.";
+                detected = [];
+              }
+            }
+          } catch (cause) {
+            if (cause instanceof HttpError && cause.status === 409) throw cause;
+            error =
+              cause instanceof HttpError
+                ? cause.message
+                : "OCR failed for this bubble. Retry OCR.";
+          }
+          const words = ordered(detected);
+          const frame = polygonBox(bubble.polygon);
+          const region: Region = {
+            id: randomUUID(),
+            page_id: page.id,
+            box: frame,
+            kind: "speech_bubble",
+            language: String(
+              page.metrics.ocr_language || project.data.source_lang,
+            ),
+            orientation: words.some((r) => r.orientation === "vertical")
+              ? "vertical"
+              : "horizontal",
+            source_text: words.map((r) => r.source_text).join("\n"),
+            translation: "",
+            confidence: 0,
+            restored: false,
+            render: {
+              speech_bubble: frame,
+              cleanup_box: frame,
+              bubble_id: bubble.id,
+              bubble_version: BUBBLE_VERSION,
+              bubble_polygon: bubble.polygon,
+              boundary_crossing: crossing,
+              source_box: words.length ? union(words.map((r) => r.box)) : frame,
+              words: words.flatMap(
+                (r) => (r.render.words as number[][]) || [r.box],
+              ),
+              diagnostic_status: crossing
+                ? "NEEDS_MANUAL_REVIEW"
+                : error
+                  ? "OCR_FAILED"
+                  : "OCR_SUCCESS",
+              failure_reason: error,
+            },
+            warnings: error ? [error] : [],
+          };
           await mutate<CloudPage>(page.id, who, (p) => {
             lease(p, input.token);
-            if (!p.tiles_done.includes(tile.index)) {
-              for (const r of regions)
-                if (
-                  !p.regions.some(
-                    (old) =>
-                      overlap(
-                        (old.render.source_box as number[]) || old.box,
-                        r.box,
-                      ) > 0.6 &&
-                      (old.source_text === r.source_text ||
-                        old.render.user_edited === true ||
-                        old.kind === "manual"),
-                  )
-                )
-                  p.regions.push(r);
-              p.regions = p.regions.slice(0, L.maxRegions);
-              p.tiles_done.push(tile.index);
-              p.tile_count = tile.count;
+            if (!p.tiles_done.includes(index)) {
+              p.tiles_done.push(index);
+              p.regions.push(region);
             }
             p.lease!.until = Date.now() + L.leaseMs;
-            p.metrics = {
-              ...p.metrics,
-              recognized_regions: p.regions.length,
-              regions_detected: p.regions.length,
-            };
             return p;
           });
           return json({ ok: true });
         }
-        if (parts[2] === "prepare" && method === "POST") {
-          if (
-            !Array.isArray(input.groups) ||
-            input.groups.length > L.maxRegions
-          )
-            fail(400, "Invalid text grouping.");
-          const seen = new Set<string>();
-          const groups: LayoutGroup[] = input.groups.map((g: LayoutGroup) => {
-            if (
-              !g ||
-              !Array.isArray(g.ids) ||
-              !g.ids.length ||
-              new Set(g.ids).size !== g.ids.length ||
-              g.ids.some(
-                (id) =>
-                  typeof id !== "string" ||
-                  seen.has(id) ||
-                  !page.regions.some((r) => r.id === id),
-              )
-            )
-              fail(400, "Each text region must be grouped once.");
-            g.ids.forEach((id) => seen.add(id));
-            const members = g.ids.map((id) =>
-              page.regions.find((r) => r.id === id)!,
-            );
-            if (
-              members.some(
-                (r) =>
-                  r.kind === "manual" ||
-                  r.restored ||
-                  r.render.user_edited ||
-                  r.render.source_verified,
-              ) &&
-              g.ids.length !== 1
-            )
-              fail(400, "Saved corrections cannot be merged.");
-            return {
-              ids: g.ids,
-              box: box(g.box, page),
-              ...(g.bubble
-                ? {
-                    bubble: box(g.bubble, page),
-                    cleanup: g.cleanup
-                      ? box(g.cleanup, page)
-                      : box(g.bubble, page),
-                  }
-                : {}),
-            };
-          });
-          if (seen.size !== page.regions.length)
-            fail(400, "Text grouping omitted a region.");
-          // Older saved pages retain the provider's paragraph order when rebuilt.
-          const source = page.regions.map((r, i) => ({
-            ...r,
-            render: {
-              ...r.render,
-              ...(r.render.ocr_order === undefined
-                ? { ocr_order: i, ocr_paragraph: "legacy" }
-                : {}),
-            },
-          }));
-          const prepared = prepareRegions(source, groups);
-          await mutate<CloudPage>(
-            page.id,
-            who,
-            (p) => {
-              lease(p, input.token);
-              p.regions = prepared;
-              p.translated = false;
-              p.metrics.layout_version = 2;
-              p.lease!.until = Date.now() + L.leaseMs;
-              return p;
-            },
-            pageDoc.version,
-          );
-          return json({ regions: prepared });
-        }
+        if (parts[2] === "prepare")
+          return fail(409, "Refresh to use the approved bubble layout.");
         if (parts[2] === "translate" && method === "POST") {
-          if (
-            !page.translated &&
-            (!page.tile_count || page.tiles_done.length !== page.tile_count) &&
-            !(
-              page.regions.length > 0 &&
-              page.regions.every(
-                (r) =>
-                  r.kind === "manual" ||
-                  r.restored ||
-                  r.render.user_edited ||
-                  r.render.source_verified,
-              )
-            )
-          )
-            fail(409, "Finish text recognition before translating.");
-          const translated = page.translated
-            ? page.regions
-            : await translate(page.regions, who, {
-                ...project.data,
-                source_lang: String(
-                  page.metrics.ocr_language || project.data.source_lang,
-                ),
+          requireReview(page);
+          if (!page.translated && page.tiles_done.length !== page.tile_count)
+            fail(409, "Finish bubble OCR before translating.");
+          const order = page.metrics.bubble_order as string[];
+          const regions = page.regions
+            .filter((r) => validRegion(page, r))
+            .sort(
+              (a, b) =>
+                order.indexOf(String(a.render.bubble_id)) -
+                order.indexOf(String(b.render.bubble_id)),
+            );
+          const translated: Region[] = [];
+          const context = regions
+            .filter((r) => !r.render.boundary_crossing)
+            .map((r) => r.source_text)
+            .join("\n");
+          for (const region of regions) {
+            if (
+              page.translated ||
+              region.translation ||
+              !region.source_text ||
+              region.render.boundary_crossing ||
+              region.restored
+            ) {
+              translated.push(region);
+              continue;
+            }
+            try {
+              const [result] = await translate(
+                [region],
+                who,
+                {
+                  ...project.data,
+                  source_lang: String(
+                    page.metrics.ocr_language || project.data.source_lang,
+                  ),
+                },
+                context,
+              );
+              translated.push(result);
+            } catch (cause) {
+              const reason =
+                cause instanceof HttpError
+                  ? cause.message
+                  : "Translation failed for this bubble.";
+              translated.push({
+                ...region,
+                render: {
+                  ...region.render,
+                  diagnostic_status: "TRANSLATION_FAILED",
+                  failure_reason: reason,
+                },
+                warnings: [...region.warnings, reason],
               });
-          await mutate<CloudPage>(page.id, who, (p) => {
+            }
+          }
+          const saved = await mutate<CloudPage>(page.id, who, (p) => {
             lease(p, input.token);
             p.regions = translated;
             p.translated = true;
             p.lease!.until = Date.now() + L.leaseMs;
             return p;
           });
-          return json({
-            regions: translated,
-            version: (await document(page.id, who)).version,
-          });
+          return json({ regions: translated, version: saved.version });
         }
         if (parts[2] === "output-urls" && method === "POST") {
           const urls: Record<string, string> = {};
@@ -781,6 +797,7 @@ async function handler(req: NextRequest, ctx: Context) {
             assets[kind] = pathFor(who, page.id, kind, page.lease!.token);
             await verifyPng(assets[kind], page.width, page.height);
           }
+          await verifyApprovedPixels(page, assets);
           const warnings = Array.isArray(input.warnings)
             ? input.warnings.map((s: unknown) => text(s, 300)).slice(0, 200)
             : [];
@@ -827,7 +844,15 @@ async function handler(req: NextRequest, ctx: Context) {
               if (!diagnostic) continue;
               r.render = {
                 ...r.render,
-                diagnostic_status: diagnostic.status,
+                diagnostic_status:
+                  diagnostic.status === "PRESERVED" &&
+                  [
+                    "OCR_FAILED",
+                    "TRANSLATION_FAILED",
+                    "NEEDS_MANUAL_REVIEW",
+                  ].includes(String(r.render.diagnostic_status))
+                    ? r.render.diagnostic_status
+                    : diagnostic.status,
                 mask_status: diagnostic.mask_pixels ? "APPLIED" : "PRESERVED",
                 mask_applied_pixels: diagnostic.mask_pixels,
                 actual_font_size: diagnostic.font_size,
@@ -845,15 +870,31 @@ async function handler(req: NextRequest, ctx: Context) {
             p.assets = { ...p.assets, ...assets };
             p.lease = undefined;
             p.revision++;
-            p.status = "needs_review";
+            const pending = p.bubble_scan!.bubbles.filter(
+              (item) => item.decision === "pending",
+            ).length;
+            const unresolved = p.regions.filter(
+              (r) =>
+                !r.restored &&
+                (!r.render.source_verified ||
+                  diagnostics.get(r.id)?.status !== "RENDERED_NEEDS_REVIEW"),
+            ).length;
+            p.status = !p.bubble_scan!.bubbles.length
+              ? "no_speech_bubbles"
+              : !approved(p.bubble_scan).length
+                ? "no_bubbles_selected"
+                : pending || unresolved
+                  ? "needs_review"
+                  : "completed";
             p.error = warnings.join(" ");
             p.metrics = {
               ...p.metrics,
-              completion: "PARTIALLY_COMPLETED",
+              completion:
+                pending || unresolved ? "PARTIALLY_COMPLETED" : "COMPLETED",
               regions: p.regions.length,
               translated_regions: p.regions.filter((r) => r.translation).length,
-              unresolved_regions: p.regions.length,
-              completed_regions: 0,
+              unresolved_regions: pending + unresolved,
+              completed_regions: p.regions.length - unresolved,
               processing_mode: "browser",
               rendered_regions: [...diagnostics.values()].filter(
                 (d) => d.status === "RENDERED_NEEDS_REVIEW",
@@ -909,6 +950,24 @@ async function handler(req: NextRequest, ctx: Context) {
         who,
         "project",
       );
+      if (!validRegion(page, region))
+        fail(409, "Open the bubble preview to approve this region first.");
+      if (parts[2] === "ocr" && method === "POST") {
+        await mutate<CloudPage>(
+          page.id,
+          who,
+          (p) => {
+            p.regions = p.regions.filter((r) => r.id !== region.id);
+            return configureBubbles(p, project.data.direction);
+          },
+          pageDoc.version,
+        );
+        await mutate<CloudProject>(project.id, who, (p) => ({
+          ...p,
+          cancelled: false,
+        }));
+        return json({ queued: true });
+      }
       if (method === "PUT" && parts.length === 2) {
         const input = await body(req);
         if (page.lease && page.lease.until > Date.now())
@@ -957,6 +1016,8 @@ async function handler(req: NextRequest, ctx: Context) {
         return json(region);
       }
       if (parts[2] === "retranslate" && method === "POST") {
+        if (region.render.boundary_crossing || !region.source_text.trim())
+          fail(422, "Verify the bubble and source text first.");
         if (page.lease && page.lease.until > Date.now())
           fail(409, "Pause processing before retranslating this region.");
         const result = await translate(

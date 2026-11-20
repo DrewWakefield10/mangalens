@@ -31,6 +31,8 @@ def main():
         "--output", type=Path, default=ROOT / "data/qa/pipeline/real-pages"
     )
     parser.add_argument("--provider", choices=("argos", "deepl"), default="argos")
+    parser.add_argument("--marks", type=Path,
+                        help="JSON mapping each filename to hand-marked speech bubble interior points")
     parser.add_argument('--render-only',action='store_true',help='Reuse the last verification project OCR/translation and validate updated rendering.')
     args = parser.parse_args()
     args.output.mkdir(parents=True, exist_ok=True)
@@ -42,10 +44,13 @@ def main():
     from app.storage import save_original, asset
     from app.process import run
     from app.rendering import usable_area
+    from app.bubbles import VERSION, detect_speech_bubbles, scan_for
+    import cv2
     from sqlalchemy import select
 
     Base.metadata.create_all(engine)
     report = []
+    marks = json.loads(args.marks.read_text(encoding="utf8")) if args.marks else None
     with DB() as db:
         if args.render_only:
             project=db.scalar(select(Project).order_by(Project.created.desc()).limit(1))
@@ -90,8 +95,45 @@ def main():
                     digest="",
                 )
                 page.digest = save_original(project_id, page.id, original)
+                candidates = detect_speech_bubbles(original)
+                if args.provider == "deepl" and (marks is None or path.name not in marks):
+                    raise ValueError("Provide manual bubble marks when testing DeepL.")
+                scores = None
+                if marks is not None:
+                    truth = marks[path.name]
+                    matched = set()
+                    accepted = set()
+                    false_accepted = 0
+                    false_uncertain = 0
+                    for item in candidates:
+                        polygon = np.asarray(item["polygon"], dtype=np.int32)
+                        hits = [index for index, point in enumerate(truth)
+                                if cv2.pointPolygonTest(polygon, tuple(point), False) >= 0]
+                        if hits:
+                            matched.update(hits)
+                            if item["detection"] == "accepted":
+                                accepted.update(hits)
+                                continue
+                        elif item["detection"] == "accepted":
+                            false_accepted += 1
+                        else:
+                            false_uncertain += 1
+                        item["decision"] = "dismissed"
+                    scores = {"marked": len(truth), "proposed": len(matched), "accepted": len(accepted),
+                              "missed": len(truth) - len(matched), "incorrectly_accepted": false_accepted,
+                              "incorrect_uncertain": false_uncertain}
+                else:
+                    for candidate in candidates:
+                        if candidate["decision"] == "pending":
+                            candidate["decision"] = "dismissed"
+                page.metrics = {"bubble_scan": {
+                    "version": VERSION, "digest": page.digest, "status": "ready", "revision": uid(),
+                    "reviewed": True, "bubbles": candidates,
+                }, "bubble_benchmark": scores}
                 db.add(page)
                 db.flush()
+            if not scan_for(page).get("reviewed"):
+                raise ValueError("This saved result predates bubble approval. Run a fresh sample scan.")
             job = Job(page_id=page.id, status="running",kind='render' if args.render_only else 'translate')
             db.add(job)
             db.commit()
@@ -194,6 +236,7 @@ def main():
                             for r in regions
                         ),
                         "seconds": item["seconds"],
+                        "scan": page.metrics.get("bubble_benchmark"),
                     },
                     ensure_ascii=True,
                 ),
