@@ -154,6 +154,7 @@ function lettering(
   );
   const ink = new Uint8Array(base.length),
     rejected = new Uint8Array(base.length);
+  const detached: number[] = [];
   const body = inset(
     inside,
     crop,
@@ -213,8 +214,21 @@ function lettering(
         size <= 0.055 * width * height &&
         w <= width * 0.5 &&
         h <= height * 0.5
-      )
-        for (const i of component) rejected[i] = 1;
+      ) {
+        const neutral =
+          !protectedInk &&
+          bodyPixels >= size * 0.6 &&
+          component.every((i) => {
+            const p = i * 4;
+            return (
+              Math.max(data[p], data[p + 1], data[p + 2]) -
+                Math.min(data[p], data[p + 1], data[p + 2]) <=
+              16
+            );
+          });
+        if (neutral) for (const i of component) detached.push(i);
+        else if (!protectedInk) for (const i of component) rejected[i] = 1;
+      }
     } else if (
       size > 0.13 * width * height ||
       w > width * 0.8 ||
@@ -225,6 +239,28 @@ function lettering(
     } else if (anchors || nearby >= size * 0.5) {
       for (const i of component) ink[i] = 1;
     }
+  }
+  if (detached.length) {
+    const candidate = ink.slice();
+    for (const i of detached) candidate[i] = 1;
+    const candidateFringe = dilate(candidate, crop, 2);
+    let sampled = 0,
+      pale = 0;
+    for (let i = 0; i < body.length; i++) {
+      if (!body[i] || excluded[i] || rim[i] || candidateFringe[i]) continue;
+      const p = i * 4;
+      const low = Math.min(data[p], data[p + 1], data[p + 2]);
+      if (low >= 220 && Math.max(data[p], data[p + 1], data[p + 2]) - low <= 16)
+        pale++;
+      sampled++;
+    }
+    // A light, approved speech balloon may contain a whole column missed by OCR.
+    // Only add glyph-scale ink when the crop also contains matched source ink.
+    const recover =
+      ink.includes(1) &&
+      sampled >= width * height * 0.2 &&
+      pale >= sampled * 0.83;
+    for (const i of detached) (recover ? ink : rejected)[i] = 1;
   }
   if (rejected.includes(1) || !ink.includes(1)) {
     describe(debug, "source", crop, ink);
@@ -371,9 +407,16 @@ function fit(
   cleaned: Uint8ClampedArray,
   region: Region,
   debug: LayoutDebug,
+  compact = false,
 ) {
   const { width, height } = crop;
-  const translation = region.translation.replace(/\r\n?/g, "\n");
+  let translation = region.translation.replace(/\r\n?/g, "\n");
+  if (
+    compact &&
+    !(region.render.manual_line_breaks ?? region.render.user_edited)
+  )
+    translation = translation.replace(/\s*\n\s*/g, " ");
+  const scale = compact ? 0.86 : 1;
   const thai = /[\u0e00-\u0e7f]/u.test(translation);
   const segmenter = thai
     ? new Intl.Segmenter("th", { granularity: "word" })
@@ -395,7 +438,10 @@ function fit(
     return { reason: TOO_LONG };
   let blocked: Uint8Array | undefined;
   for (
-    let size = Math.min(100, Number(region.render.font_size) || 100);
+    let size = Math.min(
+      compact ? 22 : 100,
+      Number(region.render.font_size) || 100,
+    );
     size >= 12;
     size--
   ) {
@@ -407,11 +453,11 @@ function fit(
     const firstCount = Math.max(
       1,
       paragraphs.length,
-      Math.floor(all.width / Math.max(1, width)) - 1,
+      Math.floor((all.width * scale) / Math.max(1, width)) - 1,
     );
     const step = Math.max(
       glyphHeight + 2,
-      Math.ceil(size * (firstCount >= 4 ? 1.15 : 1.22)),
+      Math.ceil(size * (compact ? 1.04 : firstCount >= 4 ? 1.15 : 1.22)),
     );
     const maxCount = Math.floor((height - glyphHeight) / step) + 1;
     for (
@@ -445,7 +491,8 @@ function fit(
             const next = value + paragraphs[paragraph][token];
             const metrics = measure.measureText(next.trim());
             if (
-              metrics.actualBoundingBoxLeft + metrics.actualBoundingBoxRight >
+              (metrics.actualBoundingBoxLeft + metrics.actualBoundingBoxRight) *
+                scale >
               b - a
             )
               break;
@@ -459,8 +506,8 @@ function fit(
             const spare =
               b -
               a -
-              metrics.actualBoundingBoxLeft -
-              metrics.actualBoundingBoxRight;
+              (metrics.actualBoundingBoxLeft + metrics.actualBoundingBoxRight) *
+                scale;
             const shift =
               region.render.align === "left"
                 ? 0
@@ -469,7 +516,9 @@ function fit(
                   : spare / 2;
             lines.push({
               text,
-              x: Math.round(a + shift + metrics.actualBoundingBoxLeft + offX),
+              x: Math.round(
+                a + shift + metrics.actualBoundingBoxLeft * scale + offX,
+              ),
               baseline: top + ascent,
             });
           }
@@ -488,7 +537,8 @@ function fit(
           Math.floor(
             Math.min(
               ...extents.map(
-                ({ line, metrics }) => line.x - metrics.actualBoundingBoxLeft,
+                ({ line, metrics }) =>
+                  line.x - metrics.actualBoundingBoxLeft * scale,
               ),
             ),
           ) - 2;
@@ -505,7 +555,8 @@ function fit(
           Math.ceil(
             Math.max(
               ...extents.map(
-                ({ line, metrics }) => line.x + metrics.actualBoundingBoxRight,
+                ({ line, metrics }) =>
+                  line.x + metrics.actualBoundingBoxRight * scale,
               ),
             ),
           ) + 2;
@@ -523,8 +574,10 @@ function fit(
         ctx.font = measure.font;
         ctx.textBaseline = "alphabetic";
         ctx.fillStyle = "#111";
-        for (const line of lines)
-          ctx.fillText(line.text, line.x - left, line.baseline - top);
+        for (const line of lines) {
+          ctx.setTransform(scale, 0, 0, 1, line.x - left, line.baseline - top);
+          ctx.fillText(line.text, 0, 0);
+        }
         const raster = ctx.getImageData(0, 0, glyphs.width, glyphs.height).data;
         const rejected = new Uint8Array(allowed.length);
         let drawn = 0,
@@ -627,7 +680,10 @@ export function renderApprovedBubble(original: ImageData, region: Region) {
     debug,
   );
   if (!cleaned.clean) return { debug, reason: cleaned.reason };
-  const text = fit(shape, placement, cleaned.clean, region, debug);
+  const primary = fit(shape, placement, cleaned.clean, region, debug);
+  const text = primary.glyphs
+    ? primary
+    : fit(shape, placement, cleaned.clean, region, debug, true);
   if (!text.glyphs) return { debug, reason: text.reason };
   return {
     debug,

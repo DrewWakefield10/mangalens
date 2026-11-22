@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import type { Region } from "./api";
 import type { CloudPage, CloudProject } from "./cloud-types";
-import { fail, gateway } from "./cloud-store";
+import { fail, gateway, HttpError } from "./cloud-store";
 type OCRWord = {
   WordText?: string;
   Left: number;
@@ -12,6 +12,8 @@ type OCRWord = {
 type OCRPayload = {
   OCRExitCode: number;
   IsErroredOnProcessing?: boolean;
+  ErrorMessage?: string | string[];
+  ErrorDetails?: string | string[];
   ParsedResults?: {
     FileParseExitCode: number;
     ParsedText?: string;
@@ -27,6 +29,17 @@ export type Tile = {
   height: number;
   base64: string;
 };
+export class OCRRateLimitError extends HttpError {
+  readonly retryAt: number;
+  constructor(retryAfter: string | null) {
+    super(429, "OCR.space is rate-limiting requests.");
+    const now = Date.now();
+    const timestamp = retryAfter && /^\d+$/.test(retryAfter)
+      ? now + Number(retryAfter) * 1000
+      : Date.parse(retryAfter || "");
+    this.retryAt = Math.max(now + 1000, Number.isFinite(timestamp) ? timestamp : now + 60_000);
+  }
+}
 export function overlap(a: number[], b: number[]) {
   return (
     (Math.max(0, Math.min(a[0] + a[2], b[0] + b[2]) - Math.max(a[0], b[0])) *
@@ -162,13 +175,18 @@ export async function recognize(
     );
   }
   if (response.status === 429)
-    fail(429, "OCR.space is rate-limiting requests. Retry later.");
+    throw new OCRRateLimitError(response.headers.get("Retry-After"));
   if (!response.ok)
     fail(
       502,
       "OCR.space could not process this page. Check the provider configuration or retry later.",
     );
-  return parseOcr(await response.json(), tile, page.id, source);
+  const payload: OCRPayload = await response.json();
+  if (payload.IsErroredOnProcessing &&
+      /rate.limit|too many requests|quota.*exceed/i.test([payload.ErrorMessage, payload.ErrorDetails].flat().join(" "))) {
+    throw new OCRRateLimitError(response.headers.get("Retry-After"));
+  }
+  return parseOcr(payload, tile, page.id, source);
 }
 const targetCodes: Record<string, string> = {
   en: "EN-US",

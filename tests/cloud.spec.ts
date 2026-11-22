@@ -499,6 +499,7 @@ test("approved jagged bubbles use separate cleanup and fit checks and isolate a 
     ctx.font = "24px sans-serif";
     ctx.fillText("じゃ！", 43, 122);
     ctx.fillText("またね", 327, 125);
+    ctx.fillRect(140, 137, 5, 9);
     ctx.fillStyle = "#d00";
     ctx.fillText("OUTSIDE", 460, 145);
     const regions: Region[] = shapes.map((shape, index) => {
@@ -506,7 +507,9 @@ test("approved jagged bubbles use separate cleanup and fit checks and isolate a 
       return {
         id: String(index), page_id: "fixture", box: source, language: "ja",
         orientation: "horizontal", source_text: index === 0 ? "じゃ！" : "またね",
-        confidence: 1, translation: index === 0 ? "Ça y est!\nSee you tomorrow, then." : "W".repeat(120),
+        confidence: 1, translation: index === 0
+          ? Array.from({ length: 24 }, (_, word) => word % 2 ? "again" : "soon").join("\n")
+          : "W".repeat(120),
         restored: false, warnings: [], kind: "speech_bubble",
         render: { bubble_polygon: shape, source_box: source, source_verified: true },
       };
@@ -552,11 +555,13 @@ test("approved jagged bubbles use separate cleanup and fit checks and isolate a 
         else editedPixels++;
       }
     for (const image of [bitmap, updatedImage, ...Object.values(saved)]) image.close();
-    return { unchangedOutside, sourceRemoved, placed, clipped, preservedPrevious, editedPixels,
+    const recoveredInk = clean[(140 * width + 142) * 4];
+    return { unchangedOutside, sourceRemoved, recoveredInk, placed, clipped, preservedPrevious, editedPixels,
       diagnostics: first.diagnostics, edited: edited.diagnostics };
   });
   expect(result.unchangedOutside).toBe(true);
   expect(result.sourceRemoved).toBeGreaterThan(80);
+  expect(result.recoveredInk).toBe(255);
   expect(result.placed).toBeGreaterThan(80);
   expect(result.clipped).toBe(false);
   expect(result.diagnostics[0].font_size).toBeGreaterThanOrEqual(12);
@@ -608,6 +613,11 @@ test("real page 003 crops and rendered output", async ({ request, page }, info) 
   const calls = (await usage()).slice(previousUsage);
   expect(calls.filter(call => call.kind === "ocr")).toHaveLength(8);
   expect(calls.filter(call => call.kind === "deepl")).toHaveLength(1);
+  // Exercise imperfect provider output on the actual bubble shapes.
+  const [x, y, w, h] = translated.regions[0].render.source_box;
+  translated.regions[0].render.source_box = [x, y, w, Math.ceil(h / 3)];
+  translated.regions[2].translation =
+    "Hey!\nAre\nthose\nwork\nclothes?\nAnd\nfrom\na\ntraditional\ninn,\ntoo?";
   const { build } = await import("esbuild");
   const bundle = await build({
     stdin: { contents: 'export {renderPage} from "./lib/browser-render";', resolveDir: process.cwd() },
@@ -644,4 +654,74 @@ test("real page 003 crops and rendered output", async ({ request, page }, info) 
     headers, data: { token, warnings: [], diagnostics: output.diagnostics },
   });
   expect(committed.ok(), await committed.text()).toBeTruthy();
+});
+
+test("rate limiting saves recognized bubbles and retries only deferred crops", async ({ request }) => {
+  const headers = { "X-MangaLens-Client": "web" };
+  await request.post("/api/session", { headers });
+  const project = await (await request.post("/api/projects", {
+    headers, data: { authorized: true, title: "OCR cooldown fixture" },
+  })).json();
+  const projectUrl = "/api/projects/" + project.id;
+  const rectangles = [5, 88, 171];
+  const original = await sharp(Buffer.from(
+    '<svg width="255" height="160"><rect width="255" height="160" fill="white"/>' +
+    rectangles.map(x => `<path d="M${x + 25} 65h15v14h-15z M${x + 45} 65h9v14h-9z"/>`).join("") +
+    '<path fill="#20df20" d="M115 90h12v12h-12z"/></svg>',
+  )).png().toBuffer();
+  const [asset] = await (await request.post(projectUrl + "/pages", {
+    headers, data: { pages: [{ name: "cooldown.png", width: 255, height: 160, bytes: original.length }] },
+  })).json();
+  for (const kind of ["original", "thumbnail"]) {
+    expect((await request.put(asset[kind], {
+      headers: { "Content-Type": "image/png" }, data: original,
+    })).ok()).toBeTruthy();
+  }
+  const url = "/api/pages/" + asset.id;
+  expect((await request.post(url + "/uploaded", { headers })).ok()).toBeTruthy();
+  expect((await request.post(projectUrl + "/bubble-scans", { headers, data: {} })).ok()).toBeTruthy();
+  const scan = await (await request.get(url + "/bubbles")).json();
+  const selected = rectangles.map(x => ({
+    polygon: [[x, 40], [x + 76, 40], [x + 76, 123], [x, 123]],
+    decision: "approved", confirmed: true,
+  }));
+  expect((await request.put(url + "/bubbles", {
+    headers, data: { revision: scan.revision, bubbles: [
+      ...scan.bubbles.map((bubble: object) => ({ ...bubble, decision: "dismissed" })), ...selected,
+    ] },
+  })).ok()).toBeTruthy();
+  expect((await request.post(projectUrl + "/start", {
+    headers, data: { source_lang: "ja", target_lang: "en", provider: "deepl", direction: "ltr" },
+  })).ok()).toBeTruthy();
+  const claim = async () => (await (await request.post(projectUrl + "/claim", { headers })).json());
+  const countCalls = async () => (await (await request.get("http://127.0.0.1:4401/fixture/state")).json())
+    .ml_usage.filter((item: { kind: string }) => item.kind === "ocr").length;
+  const recognize = (token: string, indices: number[]) => request.post(url + "/recognize", {
+    headers, data: { token, indices },
+  });
+  const { token } = await claim();
+  const before = await countCalls();
+  expect((await recognize(token, [0, 1, 2])).ok()).toBeTruthy();
+  expect(await countCalls()).toBe(before + 2);
+  const translated = await (await request.post(url + "/translate", { headers, data: { token } })).json();
+  expect(translated.regions.map((r: { translation: string }) => r.translation)).toEqual(["A new chapter", "", ""]);
+  expect((await request.post(url + "/failed", {
+    headers, data: { token, message: "Release fixture lease" },
+  })).ok()).toBeTruthy();
+  expect((await request.post(url + "/rebuild", { headers })).ok()).toBeTruthy();
+  const retry = await claim();
+  expect(retry.page.tiles_done).toEqual([0]);
+  expect(retry.page.metrics.ocr_retry_at).toBeGreaterThan(Date.now());
+  expect((await recognize(retry.token, [1, 2])).ok()).toBeTruthy();
+  expect(await countCalls()).toBe(before + 2);
+  expect((await request.post(url + "/failed", {
+    headers, data: { token: retry.token, message: "Release fixture lease" },
+  })).ok()).toBeTruthy();
+  await expect.poll(() => Date.now(), { timeout: 6500 }).toBeGreaterThan(retry.page.metrics.ocr_retry_at);
+  expect((await request.post(url + "/rebuild", { headers })).ok()).toBeTruthy();
+  expect((await recognize((await claim()).token, [0, 1, 2])).ok()).toBeTruthy();
+  expect(await countCalls()).toBe(before + 4);
+  const results = await (await request.get(url + "/regions")).json();
+  expect(results.map((r: { source_text: string }) => r.source_text)).toEqual(["Hello!", "Hello!", "Hello!"]);
+  expect(results[0].id).toBe(translated.regions[0].id);
 });

@@ -18,7 +18,7 @@ import {
 import { randomUUID } from "node:crypto";
 import { NextRequest, NextResponse } from "next/server";
 import type { Region } from "@/lib/api";
-import { BOUNDARY, CLEANUP, TOO_LONG, type LayoutDebug } from "@/lib/render-feedback";
+import { BOUNDARY, CLEANUP, OCR_DEFERRED, TOO_LONG, type LayoutDebug } from "@/lib/render-feedback";
 import {
   CLOUD_LIMITS as L,
   type CloudPage,
@@ -43,7 +43,7 @@ import {
   verifyPng,
   cleanup,
 } from "@/lib/cloud-store";
-import { recognize, translate } from "@/lib/cloud-providers";
+import { OCRRateLimitError, recognize, translate } from "@/lib/cloud-providers";
 export const runtime = "nodejs";
 export const maxDuration = 300;
 export const dynamic = "force-dynamic";
@@ -573,7 +573,7 @@ async function handler(req: NextRequest, ctx: Context) {
             )
               p.regions = p.regions.filter((r) => r.source_text || r.restored);
             if (parts[2] === "rebuild")
-              p.regions = p.regions.filter(r => !r.render.boundary_crossing || r.source_text || r.restored);
+              p.regions = p.regions.filter(r => r.source_text || r.translation || r.restored);
             return configureBubbles(
               p,
               project.data.direction,
@@ -612,10 +612,12 @@ async function handler(req: NextRequest, ctx: Context) {
           if (!indices.length) return json({ ok: true });
           const ids = page.metrics.bubble_order as string[];
           const selections = approved(page.bubble_scan);
-          const original = await readOcrPage(page);
+          let retryAt = Math.max(Number(page.metrics.ocr_retry_at || 0), project.data.ocr_retry_at || 0);
+          const original = retryAt > Date.now() ? undefined : await readOcrPage(page);
           const crops = await Promise.all(indices.map(async index => {
             const bubble = selections.find(item => item.id === ids?.[index]);
             if (!bubble) return fail(409, "Approved bubble selection changed.");
+            if (!original) return { index, bubble, tile: null, error: OCR_DEFERRED };
             try {
               const tile = await maskedTile(page, bubble, index, original);
               return { index, bubble, tile, error: tile ? "" : BOUNDARY };
@@ -632,10 +634,15 @@ async function handler(req: NextRequest, ctx: Context) {
             p.lease!.until = Date.now() + L.leaseMs;
             return p;
           }, pageDoc.version);
-          await Promise.all(crops.map(async ({ index, bubble, tile, error }) => {
+          let skipped = 0;
+          for (const { index, bubble, tile, error: cropError } of crops) {
+            let error = cropError;
             const crossing = !tile && error === BOUNDARY;
             let detected: Region[] = [];
-            if (tile) {
+            if (tile && retryAt > Date.now()) {
+              error = OCR_DEFERRED;
+              skipped++;
+            } else if (tile) {
               try {
                 detected = await recognize(tile, who, page, project.data);
                 const outline = polygonRows(bubble.polygon);
@@ -649,7 +656,15 @@ async function handler(req: NextRequest, ctx: Context) {
                   detected = [];
                 }
               } catch (cause) {
-                error = cause instanceof HttpError ? cause.message : "OCR failed for this bubble. Retry OCR.";
+                if (cause instanceof HttpError && cause.status === 429) {
+                  retryAt = cause instanceof OCRRateLimitError ? cause.retryAt : Date.now() + 60_000;
+                  await mutate<CloudProject>(project.id, who, p => ({
+                    ...p, ocr_retry_at: Math.max(p.ocr_retry_at || 0, retryAt),
+                  }));
+                  error = OCR_DEFERRED;
+                } else {
+                  error = cause instanceof HttpError ? cause.message : "OCR failed for this bubble. Retry OCR.";
+                }
               }
             }
             const words = ordered(detected);
@@ -695,10 +710,16 @@ async function handler(req: NextRequest, ctx: Context) {
                 p.tiles_done.push(index);
                 p.regions.push(region);
               }
+              if (retryAt > Date.now()) p.metrics.ocr_retry_at = retryAt;
               p.lease!.until = Date.now() + L.leaseMs;
               return p;
             });
-          }));
+          }
+          if (skipped) await mutate<CloudPage>(page.id, who, p => {
+            lease(p, input.token);
+            p.metrics.ocr_requests = Number(p.metrics.ocr_requests) - skipped;
+            return p;
+          });
           return json({ ok: true });
         }
         if (parts[2] === "prepare")
@@ -876,11 +897,18 @@ async function handler(req: NextRequest, ctx: Context) {
                 : pending || unresolved
                   ? "needs_review"
                   : "completed";
-            p.error = [...new Set([...warnings, ...p.regions.flatMap(r =>
+            const deferred = p.regions.filter(r => r.render.failure_reason === OCR_DEFERRED).length;
+            const remaining = Math.ceil((Number(p.metrics.ocr_retry_at || 0) - Date.now()) / 60_000);
+            const retryNotice = remaining > 0
+              ? `Rebuild page translation in about ${remaining} min.` : "Use Rebuild page translation to retry.";
+            const otherWarnings = [...warnings, ...p.regions.flatMap(r =>
               !diagnostics.has(r.id) && r.render.failure_reason
                 ? ["Region " + (p.regions.indexOf(r) + 1) + ": " + r.render.failure_reason]
                 : [],
-            )])].join(" ");
+            )].filter(warning => !warning.endsWith(OCR_DEFERRED));
+            p.error = [...new Set([...otherWarnings,
+              ...(deferred ? [`OCR paused for ${deferred} ${deferred === 1 ? "bubble" : "bubbles"}. ${retryNotice}`] : []),
+            ])].join(" ");
             p.metrics = {
               ...p.metrics,
               completion:
@@ -969,8 +997,12 @@ async function handler(req: NextRequest, ctx: Context) {
           who,
           (p) => {
             const r = p.regions.find((r) => r.id === region.id)!;
+            const translation = text(input.translation, 6000);
+            const manualLineBreaks = translation !== r.translation
+              ? translation.includes("\n")
+              : r.render.manual_line_breaks ?? (r.render.user_edited && translation.includes("\n"));
             r.source_text = text(input.source_text, 3000);
-            r.translation = text(input.translation, 6000);
+            r.translation = translation;
             r.language = text(input.language, 16);
             r.box = box(input.box, p);
             r.restored = Boolean(input.restored);
@@ -981,6 +1013,7 @@ async function handler(req: NextRequest, ctx: Context) {
             r.render = {
               ...r.render,
               user_edited: true,
+              manual_line_breaks: Boolean(manualLineBreaks),
               mask_dilation: integer(input.mask_dilation ?? 1, 0, 4),
               font_size: integer(input.font_size, 12, 200),
               align: ["left", "center", "right"].includes(input.align)
@@ -1031,7 +1064,7 @@ async function handler(req: NextRequest, ctx: Context) {
         if (page.lease && page.lease.until > Date.now())
           fail(409, "Pause processing before retranslating this region.");
         const result = await translate(
-          [{ ...region, translation: "" }],
+          [{ ...region, translation: "", render: { ...region.render, manual_line_breaks: false } }],
           who,
           project.data,
         );

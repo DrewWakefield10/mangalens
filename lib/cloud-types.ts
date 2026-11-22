@@ -35,6 +35,7 @@ export type CloudProject = {
   direction: string;
   last_page: number;
   cancelled: boolean;
+  ocr_retry_at?: number;
   glossary: { source: string; target: string }[];
 };
 export type Document<T> = {
