@@ -3,6 +3,7 @@ import { readFile } from "node:fs/promises";
 import { before, after, test } from "node:test";
 import { PGlite } from "@electric-sql/pglite";
 import { parseOcr, overlap } from "../lib/cloud-providers";
+import { boundaryInk, polygonRows } from "../lib/bubble-geometry";
 import {
   document,
   mutate,
@@ -12,6 +13,21 @@ import {
 } from "../lib/cloud-store";
 
 let pg: PGlite;
+
+test("shallow outline can be excluded without accepting a clipped stroke", () => {
+  const shape = polygonRows([[0, 0], [79, 0], [79, 59], [0, 59]]);
+  const pixels = new Uint8Array(shape.width * shape.height * 4).fill(255);
+  const darken = (x: number, y: number) => pixels.fill(30, (y * shape.width + x) * 4, (y * shape.width + x) * 4 + 3);
+  for (let x = 12; x < 39; x++) darken(x, 0);
+  for (let y = 1; y < 5; y++) darken(38, y);
+  darken(15, 14);
+  const outline = boundaryInk(pixels, shape);
+  assert.equal(outline.crossing, false);
+  assert.equal(outline.rim[38 + 4 * shape.width], 1);
+  assert.equal(outline.rim[15 + 14 * shape.width], 0);
+  for (let x = 0; x < 23; x++) darken(x, 20);
+  assert.equal(boundaryInk(pixels, shape).crossing, true);
+});
 before(async () => {
   pg = new PGlite();
   await pg.exec(

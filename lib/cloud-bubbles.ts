@@ -1,3 +1,4 @@
+import { boundaryInk } from "./bubble-geometry";
 import { randomUUID } from "node:crypto";
 import sharp from "sharp";
 import {
@@ -72,6 +73,7 @@ export function configureBubbles(
     ...page.metrics,
     bubble_order: selections.map((bubble) => bubble.id),
     layout_version: 3,
+    ocr_requests: 0,
   };
   delete page.metrics.render_region_id;
   page.tiles_done = selections.flatMap((bubble, index) =>
@@ -433,32 +435,31 @@ export function saveReview(
   };
 }
 
+export async function readOcrPage(page: CloudPage) {
+  const input = await readAsset(page.assets.original);
+  const data = await input.raw().toBuffer();
+  return sharp(data, { raw: { width: page.width, height: page.height, channels: 4 } });
+}
+
 export async function maskedTile(
   page: CloudPage,
   bubble: Bubble,
   index: number,
+  original: Awaited<ReturnType<typeof readOcrPage>>,
 ): Promise<Tile | null> {
   const shape = polygonRows(bubble.polygon);
-  const crop = await readAsset(page.assets.original);
   const { x, y, width, height } = shape;
-  const pixels = await crop
+  const pixels = await original.clone()
     .extract({ left: x, top: y, width, height })
     .raw()
     .toBuffer();
+  const { crossing, rim } = boundaryInk(pixels, shape);
+  if (crossing) return null;
   for (let row = 0; row < height; row++)
     for (let col = 0; col < width; col++) {
-      const offset = (row * width + col) * 4;
-      const px = x + col,
-        py = y + row;
-      if (!shape.contains(px, py)) pixels.fill(255, offset, offset + 4);
-      else if (
-        Math.min(...pixels.subarray(offset, offset + 3)) < 145 &&
-        (!shape.contains(px - 1, py) ||
-          !shape.contains(px + 1, py) ||
-          !shape.contains(px, py - 1) ||
-          !shape.contains(px, py + 1))
-      )
-        return null;
+      const i = row * width + col;
+      if (rim[i] || !shape.contains(x + col, y + row))
+        pixels.fill(255, i * 4, i * 4 + 4);
     }
   const jpeg = await sharp(pixels, { raw: { width, height, channels: 4 } })
     .jpeg({ quality: 88 })
@@ -480,8 +481,12 @@ export async function verifyApprovedPixels(
   page: CloudPage,
   assets: Record<string, string>,
 ) {
-  const originalImage = await readAsset(page.assets.original);
-  const original = await originalImage.raw().toBuffer();
+  const kinds = ["translated", "clean", "mask"] as const;
+  const [original, ...outputs] = await Promise.all(
+    [page.assets.original, ...kinds.map(kind => assets[kind])].map(async path =>
+      (await readAsset(path)).raw().toBuffer(),
+    ),
+  );
   const mask = Buffer.alloc(page.width * page.height);
   for (const bubble of approved(page.bubble_scan)) {
     const shape = polygonRows(bubble.polygon);
@@ -491,9 +496,8 @@ export async function verifyApprovedPixels(
         mask.fill(1, row + cuts[i], row + cuts[i + 1]);
     }
   }
-  for (const kind of ["translated", "clean", "mask"]) {
-    const image = await readAsset(assets[kind]);
-    const pixels = await image.raw().toBuffer();
+  for (const [index, kind] of kinds.entries()) {
+    const pixels = outputs[index];
     if (pixels.length !== original.length)
       fail(422, "The rendered page has different dimensions.");
     for (let i = 0; i < mask.length; i++) {

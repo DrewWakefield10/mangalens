@@ -2,7 +2,7 @@
 import { useEffect, useState } from "react";
 import { useQueryClient } from "@tanstack/react-query";
 import { api, type Health, type Project, type Region } from "@/lib/api";
-import type { CloudPage, CloudProject } from "@/lib/cloud-types";
+import { CLOUD_LIMITS, type CloudPage, type CloudProject } from "@/lib/cloud-types";
 import { Button } from "./ui/button";
 import Link from "next/link";
 type Claim = { page: CloudPage; project: CloudProject; token: string };
@@ -65,12 +65,14 @@ export default function BrowserProcessor() {
             const savedImages: ImageBitmap[] = [];
             try {
               if (!page.translated) {
-                for (let index = 0; index < page.tile_count; index++) {
+                const pending = Array.from({ length: page.tile_count }, (_, index) => index)
+                  .filter(index => !page.tiles_done.includes(index));
+                for (let start = 0; start < pending.length; start += CLOUD_LIMITS.ocrBatch) {
                   if (stopped) throw new DOMException("Processing paused", "AbortError");
-                  if (page.tiles_done.includes(index)) continue;
-                  setMessage(`Recognizing ${page.name} · bubble ${index + 1} of ${page.tile_count}.`);
+                  const indices = pending.slice(start, start + CLOUD_LIMITS.ocrBatch);
+                  setMessage(`Recognizing ${page.name} · ${page.tile_count - pending.length + start} of ${page.tile_count} bubbles ready.`);
                   await api("/pages/" + page.id + "/recognize", {
-                    method: "POST", body: JSON.stringify({ token, index }), signal: controller.signal,
+                    method: "POST", body: JSON.stringify({ token, indices }), signal: controller.signal,
                   });
                 }
               }
@@ -117,13 +119,14 @@ export default function BrowserProcessor() {
                   signal: controller.signal,
                 },
               );
-              for (const kind of ["translated", "clean", "mask"] as const) {
+              const kinds = ["translated", "clean", "mask"] as const;
+              for (const kind of kinds) {
                 if (result[kind].size > 8 * 1024 * 1024)
                   throw new Error(
                     "The rendered page exceeds 8 MB. Use a smaller image.",
                   );
-                await uploadImage(urls[kind], result[kind], controller.signal);
               }
+              await Promise.all(kinds.map(kind => uploadImage(urls[kind], result[kind], controller.signal)));
               await api("/pages/" + page.id + "/commit", {
                 method: "POST",
                 body: JSON.stringify({

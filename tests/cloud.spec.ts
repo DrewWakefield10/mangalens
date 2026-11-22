@@ -1,4 +1,6 @@
 import { test, expect } from "@playwright/test";
+import { readFile } from "node:fs/promises";
+import sharp from "sharp";
 test.skip(
   process.env.CLOUD_BROWSER_TEST !== "1",
   "Run with npm run test:cloud-browser; uses a test double for storage and recognized text.",
@@ -562,4 +564,84 @@ test("approved jagged bubbles use separate cleanup and fit checks and isolate a 
   expect(result.preservedPrevious).toBe(true);
   expect(result.editedPixels).toBeGreaterThan(80);
   expect(result.edited.map(({ id }) => id)).toEqual(["1"]);
+});
+test("real page 003 crops and rendered output", async ({ request, page }, info) => {
+  const file = await readFile("samples/sora-wo-matotte-chapter-34/003.jpg").catch(() => null);
+  test.skip(!file, "Local manga sample");
+  const geometry = await import("../lib/bubble-geometry");
+  await request.post("/api/session", {headers:{ "X-MangaLens-Client":"web" }});
+  const headers = { "X-MangaLens-Client": "web" };
+  const original = await sharp(file!).png().toBuffer({ resolveWithObject: true });
+  const thumb = await sharp(file!).resize(256).png().toBuffer();
+  const project = await (await request.post("/api/projects", {headers, data:{authorized:true,title:"003 timing"}})).json();
+  const create = await request.post("/api/projects/"+project.id+"/pages", {headers, data:{pages:[{ name:"003.jpg",width:original.info.width,height:original.info.height,bytes:original.data.length }]}});
+  expect(create.ok(), await create.text()).toBeTruthy();
+  const [asset] = await create.json();
+  for (const [url, bytes] of [[asset.original, original.data], [asset.thumbnail, thumb]] as const)
+    expect((await request.put(url,{headers:{"Content-Type":"image/png"},data:bytes})).ok()).toBeTruthy();
+  const url = "/api/pages/"+asset.id;
+  expect((await request.post(url+"/uploaded",{headers})).ok()).toBeTruthy();
+  expect((await request.post("/api/projects/"+project.id+"/bubble-scans",{headers,data:{}})).ok()).toBeTruthy();
+  const scan = await (await request.get(url+"/bubbles")).json();
+  const marks = [[750,123],[510,114],[325,92],[430,400],[99,394],[375,574],[382,880],[112,1040]];
+  for (const mark of marks) expect(scan.bubbles.some((r: {polygon: import("../lib/bubble-geometry").Point[]})=>geometry.polygonRows(r.polygon).contains(mark[0],mark[1]))).toBeTruthy();
+  for (const row of scan.bubbles) {
+    const shape = geometry.polygonRows(row.polygon);
+    row.decision=marks.some(([x,y])=>shape.contains(x,y)) ? "approved":"dismissed"; row.confirmed=true;
+  }
+  const save = await request.put(url+"/bubbles",{headers,data:{revision:scan.revision,bubbles:scan.bubbles}});
+  expect(save.ok(), await save.text()).toBeTruthy();
+  expect((await request.post("/api/projects/"+project.id+"/start",{headers,data:{source_lang:"ja",target_lang:"en",provider:"deepl"}})).ok()).toBeTruthy();
+  const claim = await (await request.post("/api/projects/"+project.id+"/claim",{headers})).json();
+  const {token} = claim;
+  const usage = async () => (await (await request.get("http://127.0.0.1:4401/fixture/state")).json()).ml_usage as { kind: string }[];
+  const previousUsage = (await usage()).length;
+  expect(claim.page.tile_count).toBe(8);
+  for(let i=0;i<claim.page.tile_count;i+=3) {
+    const indices = Array.from({length:Math.min(3,claim.page.tile_count-i)},(_,n)=>i+n);
+    const result = await request.post(url+"/recognize",{headers,data:{token,indices}});
+    expect(result.ok(), await result.text()).toBeTruthy();
+  }
+  const result = await request.post(url+"/translate",{headers,data:{token}});
+  expect(result.ok(), await result.text()).toBeTruthy();
+  const translated = await result.json();
+  const calls = (await usage()).slice(previousUsage);
+  expect(calls.filter(call => call.kind === "ocr")).toHaveLength(8);
+  expect(calls.filter(call => call.kind === "deepl")).toHaveLength(1);
+  const { build } = await import("esbuild");
+  const bundle = await build({
+    stdin: { contents: 'export {renderPage} from "./lib/browser-render";', resolveDir: process.cwd() },
+    bundle: true, write: false, format: "iife", globalName: "Page003",
+  });
+  await page.goto("/");
+  await page.addScriptTag({ content: bundle.outputFiles[0].text });
+  const output = await page.evaluate(async ({ image, cloudPage, regions }) => {
+    const { renderPage } = (window as unknown as { Page003: typeof import("../lib/browser-render") }).Page003;
+    const bitmap = await createImageBitmap(await (await fetch("data:image/png;base64," + image)).blob());
+    const result = await renderPage(bitmap, cloudPage, regions);
+    bitmap.close();
+    const encode = (blob: Blob) => new Promise<string>((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = () => resolve(String(reader.result).split(",")[1]);
+      reader.onerror = reject;
+      reader.readAsDataURL(blob);
+    });
+    return { diagnostics: result.diagnostics, clean: await encode(result.clean),
+      translated: await encode(result.translated), mask: await encode(result.mask) };
+  }, { image: original.data.toString("base64"), cloudPage: claim.page, regions: translated.regions });
+  await info.attach("003-clean",{body: Buffer.from(output.clean,"base64"),contentType:"image/png"});
+  await info.attach("003-translated",{body: Buffer.from(output.translated,"base64"),contentType:"image/png"});
+  expect(output.diagnostics).toHaveLength(8);
+  expect(output.diagnostics.map(d => d.reason)).toEqual(Array(8).fill(""));
+  expect(output.diagnostics.every(d => d.mask_pixels > 0 && d.font_size >= 12)).toBeTruthy();
+  const storage = await (await request.post(url + "/output-urls", { headers, data: { token } })).json();
+  for (const kind of ["translated", "clean", "mask"] as const) {
+    expect((await request.put(storage[kind], {
+      headers: { "Content-Type": "image/png" }, data: Buffer.from(output[kind], "base64"),
+    })).ok()).toBeTruthy();
+  }
+  const committed = await request.post(url + "/commit", {
+    headers, data: { token, warnings: [], diagnostics: output.diagnostics },
+  });
+  expect(committed.ok(), await committed.text()).toBeTruthy();
 });

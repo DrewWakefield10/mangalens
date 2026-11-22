@@ -177,9 +177,15 @@ def masked_crop(original, polygon):
     interior = polygon_mask((h, w), [[px - x, py - y] for px, py in polygon])
     pixels = np.array(original.crop((x, y, x + w, y + h)).convert("RGB"))
     gray = cv2.cvtColor(pixels, cv2.COLOR_RGB2GRAY)
-    # A connected ink stroke cut by the selection can be incomplete lettering.
-    # Exclude the entire bubble from OCR if ink reaches its immediate edge.
-    inner = cv2.erode(np.pad(interior, 2), np.ones((5, 5), np.uint8))[2:-2, 2:-2]
-    crossing = bool(np.any((gray < 145) & (interior > 0) & (inner == 0)))
+    dark = ((gray < 145) & (interior > 0)).astype(np.uint8)
+    edge = cv2.erode(interior, np.ones((3, 3), np.uint8), borderType=cv2.BORDER_CONSTANT, borderValue=0) == 0
+    reach = min(8, max(3, min(w, h) // 8))
+    core = cv2.erode(interior, np.ones((2 * reach + 1,) * 2, np.uint8),
+                     borderType=cv2.BORDER_CONSTANT, borderValue=0) > 0
+    count, labels = cv2.connectedComponents(dark, connectivity=4)
+    rim = np.unique(labels[edge & (dark > 0)])
+    deep_counts = np.bincount(labels[core & (dark > 0)], minlength=count)
+    crossing = bool(np.any(deep_counts[rim] >= 5))
+    pixels[np.isin(labels, rim)] = 255
     pixels[interior == 0] = 255
     return Image.fromarray(pixels), (x, y), crossing

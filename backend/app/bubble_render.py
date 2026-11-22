@@ -71,6 +71,7 @@ def approved_mask(array, region, interior=None):
     ink = np.zeros_like(gray)
     rejected = np.zeros_like(gray)
     crossing = np.zeros_like(gray)
+    body = inset(outline, min(8, max(3, min(w, h) // 8)))
     for index in range(1, count):
         a, b, cw, ch, size = stats[index]
         local_slice = np.s_[b:b + ch, a:a + cw]
@@ -78,7 +79,8 @@ def approved_mask(array, region, interior=None):
         anchors = np.count_nonzero(component & (source[local_slice] > 0))
         near = np.count_nonzero(component & (nearby[local_slice] > 0))
         touching = component & (interior[local_slice] == 0)
-        if anchors and np.any(touching):
+        body_pixels = np.count_nonzero(component & (body[local_slice] > 0))
+        if anchors and body_pixels >= 5 and np.any(touching):
             crossing[local_slice][touching] = 255
             continue
         if np.any(touching):
@@ -88,7 +90,7 @@ def approved_mask(array, region, interior=None):
         if not near:
             # An isolated probable glyph beyond the OCR extent must be
             # reviewed. Tiny texture/screening dots are not treated as words.
-            if 10 <= size <= 0.055 * w * h and cw <= w * .5 and ch <= h * .5:
+            if body_pixels and 10 <= size <= 0.055 * w * h and cw <= w * .5 and ch <= h * .5:
                 rejected[local_slice][component] = 255
             continue
         if (size > .13 * w * h or cw > .8 * w or ch > .8 * h

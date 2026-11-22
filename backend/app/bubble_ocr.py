@@ -34,7 +34,7 @@ def bubble_ocr(db, page, project, source):
                           bool(settings.google_vision_api_key), settings.ocr_min_confidence,
                           settings.ocr_min_agreement)
         cached = db.get(Cache, key)
-        if cached and not retry:
+        if cached and not retry and not cached.value.get("render", {}).get("boundary_crossing"):
             return cached.value
         crop, (x, y), crossing = masked_crop(original, bubble["polygon"])
         options = {"bubble_version": VERSION, "bubble_id": bubble["id"],

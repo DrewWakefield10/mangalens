@@ -8,6 +8,7 @@ import {
 import {
   configureBubbles,
   maskedTile,
+  readOcrPage,
   requireReview,
   saveReview,
   scanBubbles,
@@ -571,6 +572,8 @@ async function handler(req: NextRequest, ctx: Context) {
               !req.nextUrl.searchParams.has("changed_only")
             )
               p.regions = p.regions.filter((r) => r.source_text || r.restored);
+            if (parts[2] === "rebuild")
+              p.regions = p.regions.filter(r => !r.render.boundary_crossing || r.source_text || r.restored);
             return configureBubbles(
               p,
               project.data.direction,
@@ -601,105 +604,101 @@ async function handler(req: NextRequest, ctx: Context) {
         if (project.data.cancelled) fail(409, "This chapter was paused.");
         if (parts[2] === "recognize" && method === "POST") {
           requireReview(page);
-          const index = integer(input.index, 0, page.tile_count - 1);
+          const requested = input.indices ?? [input.index];
+          if (!Array.isArray(requested) || !requested.length || requested.length > L.ocrBatch)
+            fail(400, "Select a valid group of bubbles.");
+          const indices = [...new Set<number>(requested.map((index: unknown) => integer(index, 0, page.tile_count - 1)))]
+            .filter(index => !page.tiles_done.includes(index));
+          if (!indices.length) return json({ ok: true });
           const ids = page.metrics.bubble_order as string[];
-          const bubble = approved(page.bubble_scan).find(
-            (item) => item.id === ids?.[index],
-          );
-          if (!bubble) return fail(409, "Approved bubble selection changed.");
-          if (page.tiles_done.includes(index)) return json({ ok: true });
-          const outline = polygonRows(bubble.polygon);
-          let error = "";
-          let detected: Region[] = [];
-          let crossing = false;
-          try {
-            const tile = await maskedTile(page, bubble, index);
-            if (!tile) {
-              crossing = true;
-              error =
-                "Bubble boundary cuts through lettering. Edit Bubble Boundary.";
-            } else {
-              await mutate<CloudPage>(
-                page.id,
-                who,
-                (p) => {
-                  lease(p, input.token);
-                  const attempts = Number(p.metrics.ocr_requests || 0);
-                  if (attempts >= L.maxTiles)
-                    fail(429, "This page reached its OCR request budget.");
-                  p.metrics.ocr_requests = attempts + 1;
-                  return p;
-                },
-                pageDoc.version,
-              );
-              detected = await recognize(tile, who, page, project.data);
-              const outside = detected.some((r) => {
-                const [x, y, w, h] = r.box;
-                return !outline.contains(
-                  Math.floor(x + w / 2),
-                  Math.floor(y + h / 2),
-                );
-              });
-              if (outside || !detected.length) {
-                error = outside
-                  ? "OCR returned lettering beyond the selection. Check the bubble boundary."
-                  : "OCR could not read the lettering. Retry OCR or verify a transcription.";
-                detected = [];
-              }
+          const selections = approved(page.bubble_scan);
+          const original = await readOcrPage(page);
+          const crops = await Promise.all(indices.map(async index => {
+            const bubble = selections.find(item => item.id === ids?.[index]);
+            if (!bubble) return fail(409, "Approved bubble selection changed.");
+            try {
+              const tile = await maskedTile(page, bubble, index, original);
+              return { index, bubble, tile, error: tile ? "" : BOUNDARY };
+            } catch (cause) {
+              if (!(cause instanceof HttpError && cause.status === 422)) throw cause;
+              return { index, bubble, tile: null, error: cause.message };
             }
-          } catch (cause) {
-            if (cause instanceof HttpError && cause.status === 409) throw cause;
-            error =
-              cause instanceof HttpError
-                ? cause.message
-                : "OCR failed for this bubble. Retry OCR.";
-          }
-          const words = ordered(detected);
-          const frame = polygonBox(bubble.polygon);
-          const region: Region = {
-            id: randomUUID(),
-            page_id: page.id,
-            box: frame,
-            kind: "speech_bubble",
-            language: String(
-              page.metrics.ocr_language || project.data.source_lang,
-            ),
-            orientation: words.some((r) => r.orientation === "vertical")
-              ? "vertical"
-              : "horizontal",
-            source_text: words.map((r) => r.source_text).join("\n"),
-            translation: "",
-            confidence: 0,
-            restored: false,
-            render: {
-              speech_bubble: frame,
-              cleanup_box: frame,
-              bubble_id: bubble.id,
-              bubble_version: BUBBLE_VERSION,
-              bubble_polygon: bubble.polygon,
-              boundary_crossing: crossing,
-              source_box: words.length ? union(words.map((r) => r.box)) : frame,
-              words: words.flatMap(
-                (r) => (r.render.words as number[][]) || [r.box],
-              ),
-              diagnostic_status: crossing
-                ? "NEEDS_MANUAL_REVIEW"
-                : error
-                  ? "OCR_FAILED"
-                  : "OCR_SUCCESS",
-              failure_reason: error,
-            },
-            warnings: error ? [error] : [],
-          };
-          await mutate<CloudPage>(page.id, who, (p) => {
+          }));
+          await mutate<CloudPage>(page.id, who, p => {
             lease(p, input.token);
-            if (!p.tiles_done.includes(index)) {
-              p.tiles_done.push(index);
-              p.regions.push(region);
-            }
+            const attempts = Number(p.metrics.ocr_requests || 0) + crops.filter(crop => crop.tile).length;
+            if (attempts > L.maxTiles) fail(429, "This page reached its OCR request budget.");
+            p.metrics.ocr_requests = attempts;
             p.lease!.until = Date.now() + L.leaseMs;
             return p;
-          });
+          }, pageDoc.version);
+          await Promise.all(crops.map(async ({ index, bubble, tile, error }) => {
+            const crossing = !tile && error === BOUNDARY;
+            let detected: Region[] = [];
+            if (tile) {
+              try {
+                detected = await recognize(tile, who, page, project.data);
+                const outline = polygonRows(bubble.polygon);
+                const outside = detected.some(({ box: [x, y, w, h] }) =>
+                  !outline.contains(Math.floor(x + w / 2), Math.floor(y + h / 2)),
+                );
+                if (outside || !detected.length) {
+                  error = outside
+                    ? "OCR returned lettering beyond the selection. Check the bubble boundary."
+                    : "OCR could not read the lettering. Retry OCR or verify a transcription.";
+                  detected = [];
+                }
+              } catch (cause) {
+                error = cause instanceof HttpError ? cause.message : "OCR failed for this bubble. Retry OCR.";
+              }
+            }
+            const words = ordered(detected);
+            const frame = polygonBox(bubble.polygon);
+            const region: Region = {
+              id: randomUUID(),
+              page_id: page.id,
+              box: frame,
+              kind: "speech_bubble",
+              language: String(
+                page.metrics.ocr_language || project.data.source_lang,
+              ),
+              orientation: words.some((r) => r.orientation === "vertical")
+                ? "vertical"
+                : "horizontal",
+              source_text: words.map((r) => r.source_text).join("\n"),
+              translation: "",
+              confidence: 0,
+              restored: false,
+              render: {
+                speech_bubble: frame,
+                cleanup_box: frame,
+                bubble_id: bubble.id,
+                bubble_version: BUBBLE_VERSION,
+                bubble_polygon: bubble.polygon,
+                boundary_crossing: crossing,
+                source_box: words.length ? union(words.map((r) => r.box)) : frame,
+                words: words.flatMap(
+                  (r) => (r.render.words as number[][]) || [r.box],
+                ),
+                diagnostic_status: crossing
+                  ? "NEEDS_MANUAL_REVIEW"
+                  : error
+                    ? "OCR_FAILED"
+                    : "OCR_SUCCESS",
+                failure_reason: error,
+              },
+              warnings: error ? [error] : [],
+            };
+            await mutate<CloudPage>(page.id, who, p => {
+              lease(p, input.token);
+              if (!p.tiles_done.includes(index)) {
+                p.tiles_done.push(index);
+                p.regions.push(region);
+              }
+              p.lease!.until = Date.now() + L.leaseMs;
+              return p;
+            });
+          }));
           return json({ ok: true });
         }
         if (parts[2] === "prepare")
@@ -716,51 +715,27 @@ async function handler(req: NextRequest, ctx: Context) {
                 order.indexOf(String(a.render.bubble_id)) -
                 order.indexOf(String(b.render.bubble_id)),
             );
-          const translated: Region[] = [];
-          const context = regions
-            .filter((r) => !r.render.boundary_crossing)
-            .map((r) => r.source_text)
-            .join("\n");
-          for (const region of regions) {
-            if (
-              page.translated ||
-              region.translation ||
-              !region.source_text ||
-              region.render.boundary_crossing ||
-              region.restored
-            ) {
-              translated.push(region);
-              continue;
-            }
+          const pending = regions.filter(r =>
+            !page.translated && !r.translation && r.source_text && !r.render.boundary_crossing && !r.restored,
+          );
+          const results = new Map<string, Region>();
+          if (pending.length) {
             try {
-              const [result] = await translate(
-                [region],
-                who,
-                {
-                  ...project.data,
-                  source_lang: String(
-                    page.metrics.ocr_language || project.data.source_lang,
-                  ),
-                },
-                context,
-              );
-              translated.push(result);
+              const batch = await translate(pending, who, {
+                ...project.data,
+                source_lang: String(page.metrics.ocr_language || project.data.source_lang),
+              }, regions.filter(r => !r.render.boundary_crossing).map(r => r.source_text).join("\n"));
+              for (const region of batch) results.set(region.id, region);
             } catch (cause) {
-              const reason =
-                cause instanceof HttpError
-                  ? cause.message
-                  : "Translation failed for this bubble.";
-              translated.push({
+              const reason = cause instanceof HttpError ? cause.message : "Translation failed for these bubbles.";
+              for (const region of pending) results.set(region.id, {
                 ...region,
-                render: {
-                  ...region.render,
-                  diagnostic_status: "TRANSLATION_FAILED",
-                  failure_reason: reason,
-                },
+                render: { ...region.render, diagnostic_status: "TRANSLATION_FAILED", failure_reason: reason },
                 warnings: [...region.warnings, reason],
               });
             }
           }
+          const translated = regions.map(region => results.get(region.id) || region);
           const saved = await mutate<CloudPage>(page.id, who, (p) => {
             lease(p, input.token);
             p.regions = translated;
@@ -780,11 +755,9 @@ async function handler(req: NextRequest, ctx: Context) {
             p.garbage = Array.from(new Set([...p.garbage, ...pending]));
             return p;
           });
-          for (const kind of ["translated", "clean", "mask"])
-            urls[kind] = await signed(
-              pathFor(who, page.id, kind, page.lease!.token),
-              true,
-            );
+          await Promise.all(["translated", "clean", "mask"].map(async kind => {
+            urls[kind] = await signed(pathFor(who, page.id, kind, page.lease!.token), true);
+          }));
           return json(urls);
         }
         if (parts[2] === "commit" && method === "POST") {
@@ -796,8 +769,8 @@ async function handler(req: NextRequest, ctx: Context) {
           const assets: Record<string, string> = {};
           for (const kind of ["translated", "clean", "mask"]) {
             assets[kind] = pathFor(who, page.id, kind, page.lease!.token);
-            await verifyPng(assets[kind], page.width, page.height);
           }
+          await Promise.all(Object.values(assets).map(path => verifyPng(path, page.width, page.height)));
           await verifyApprovedPixels(page, assets);
           const warnings = Array.isArray(input.warnings)
             ? input.warnings.map((s: unknown) => text(s, 300)).slice(0, 200)

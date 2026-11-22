@@ -5,22 +5,7 @@ import type { CloudPage } from "./cloud-types";
 import { blobOf, canvasOf } from "./browser-pages";
 import { renderApprovedBubble } from "./bubble-render";
 import { TOO_LONG, type LayoutDebug } from "./render-feedback";
-let font: Promise<void> | undefined;
-function loadFont() {
-  return (font ||= (async () => {
-    const faces = await Promise.all([
-      new FontFace("MangaLensCJK", "url(/fonts/NotoSansCJKjp-Regular.otf)").load(),
-      new FontFace("MangaLensThai", "url(/fonts/NotoSansThai.ttf)").load(),
-    ]);
-    faces.forEach(face => document.fonts.add(face));
-    await document.fonts.ready;
-  })().catch((error) => {
-    font = undefined;
-    throw new Error(
-      "The typesetting font could not load. Check your connection and retry.",
-    );
-  }));
-}
+import { loadTypesettingFont, typesettingFamily } from "./browser-fonts";
 function bounded(box: number[], width: number, height: number) {
   const x = Math.max(0, Math.floor(box[0])),
     y = Math.max(0, Math.floor(box[1]));
@@ -108,7 +93,7 @@ function fitText(
       ),
   );
   for (let size = maxSize; size >= 12; size -= 0.5) {
-    ctx.font = size + 'px "MangaLensCJK"';
+    ctx.font = size + "px " + typesettingFamily(region.translation);
     if (!area) {
       const lines = linesOf(
         ctx,
@@ -180,7 +165,7 @@ function fitText(
   }
 }
 function paintText(target: CanvasRenderingContext2D, region: Region, layout: { size: number; lines: TextLine[] }) {
-  target.font = layout.size + 'px "MangaLensCJK"';
+  target.font = layout.size + "px " + typesettingFamily(region.translation);
   target.fillStyle = "#111";
   target.textBaseline = "top";
   const align = String(region.render.align || "center") as CanvasTextAlign;
@@ -199,7 +184,10 @@ export async function renderPage(
   regions: Region[],
   previous?: Record<"translated" | "clean" | "mask", ImageBitmap>,
 ) {
-  await loadFont();
+  const needed = new Set(regions
+    .filter(r => !r.restored && r.translation.trim() && !r.render.boundary_crossing)
+    .map(r => typesettingFamily(r.translation)));
+  await Promise.all([...needed].map(loadTypesettingFont));
   const width = bitmap.width,
     height = bitmap.height,
     clean = canvasOf(width, height),
@@ -455,13 +443,8 @@ export async function renderPage(
     }
     base.width = base.height = 0;
   }
-  const result = {
-    translated: await blobOf(translated),
-    clean: await blobOf(clean),
-    mask: await blobOf(mask),
-    warnings,
-    diagnostics,
-  };
+  const [translatedBlob, cleanBlob, maskBlob] = await Promise.all([blobOf(translated), blobOf(clean), blobOf(mask)]);
+  const result = { translated: translatedBlob, clean: cleanBlob, mask: maskBlob, warnings, diagnostics };
   for (const canvas of [clean, translated, mask])
     canvas.width = canvas.height = 0;
   return result;

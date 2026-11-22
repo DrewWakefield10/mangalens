@@ -82,3 +82,46 @@ export function approved(scan?: BubbleScan) {
     ? scan.bubbles.filter((bubble) => bubble.decision === "approved")
     : [];
 }
+
+/** Separate shallow outline fragments from strokes entering the dialogue. */
+export function boundaryInk(pixels: ArrayLike<number>, shape: ReturnType<typeof polygonRows>) {
+  const { width, height, x, y } = shape;
+  const dark = new Uint8Array(width * height);
+  const rim = new Uint8Array(dark.length);
+  const seeds: number[] = [];
+  for (let row = 0; row < height; row++)
+    for (let col = 0; col < width; col++) {
+      const i = row * width + col, p = i * 4;
+      const px = x + col, py = y + row;
+      if (!shape.contains(px, py) || Math.min(pixels[p], pixels[p + 1], pixels[p + 2]) >= 145)
+        continue;
+      dark[i] = 1;
+      if (!shape.contains(px - 1, py) || !shape.contains(px + 1, py) ||
+          !shape.contains(px, py - 1) || !shape.contains(px, py + 1))
+        seeds.push(i);
+    }
+  const reach = Math.min(8, Math.max(3, Math.floor(Math.min(width, height) / 8)));
+  const offsets = [-reach, 0, reach];
+  const neighbors = [[-1, 0], [1, 0], [0, -1], [0, 1]];
+  for (const seed of seeds) {
+    if (!dark[seed]) continue;
+    const component = [seed];
+    dark[seed] = 0;
+    let deepPixels = 0;
+    for (const i of component) {
+      const col = i % width, row = Math.floor(i / width);
+      if (offsets.every(dy => offsets.every(dx => shape.contains(x + col + dx, y + row + dy))))
+        deepPixels++;
+      for (const [dx, dy] of neighbors) {
+        if (col + dx < 0 || col + dx >= width || row + dy < 0 || row + dy >= height) continue;
+        const neighbor = i + dy * width + dx;
+        if (!dark[neighbor]) continue;
+        dark[neighbor] = 0;
+        component.push(neighbor);
+      }
+    }
+    for (const i of component) rim[i] = 1;
+    if (deepPixels >= 5) return { crossing: true, rim };
+  }
+  return { crossing: false, rim };
+}

@@ -1,6 +1,7 @@
 import type { Region } from "./api";
-import { polygonRows, type Point } from "./bubble-geometry";
+import { boundaryInk, polygonRows, type Point } from "./bubble-geometry";
 import { canvasOf } from "./browser-pages";
+import { typesettingFamily } from "./browser-fonts";
 import {
   BOUNDARY,
   CLEANUP,
@@ -124,6 +125,7 @@ function lettering(
   crop: Crop,
   inside: Uint8Array,
   cleanup: Uint8Array,
+  rim: Uint8Array,
   region: Region,
   debug: LayoutDebug,
 ) {
@@ -133,7 +135,7 @@ function lettering(
   );
   const reference = filter(dilate(gray, crop, 10), crop, 10, false);
   const base = gray.map((g, i) =>
-    inside[i] && reference[i] - g >= 22 ? 1 : 0,
+    inside[i] && !rim[i] && reference[i] - g >= 22 ? 1 : 0,
   );
   const excluded = inside.map((_, i) =>
     Number(
@@ -152,7 +154,11 @@ function lettering(
   );
   const ink = new Uint8Array(base.length),
     rejected = new Uint8Array(base.length);
-  let boundary = false;
+  const body = inset(
+    inside,
+    crop,
+    Math.min(8, Math.max(3, Math.floor(Math.min(width, height) / 8))),
+  );
   for (let start = 0; start < base.length; start++) {
     if (!base[start]) continue;
     const component = [start];
@@ -164,6 +170,7 @@ function lettering(
       anchors = 0,
       nearby = 0;
     let touches = false,
+      bodyPixels = 0,
       protectedInk = false;
     for (let head = 0; head < component.length; head++) {
       const index = component[head],
@@ -177,6 +184,7 @@ function lettering(
       if (sources.some((box) => contains(x + col, y + row, box, margin)))
         nearby++;
       touches ||= !cleanup[index];
+      bodyPixels += body[index];
       protectedInk ||= !!excluded[index];
       for (let dy = -1; dy <= 1; dy++)
         for (let dx = -1; dx <= 1; dx++) {
@@ -196,13 +204,11 @@ function lettering(
     const size = component.length,
       w = maxX - minX + 1,
       h = maxY - minY + 1;
-    if (anchors && touches) {
-      boundary = true;
-      for (const i of component) if (!cleanup[i]) rejected[i] = 1;
-    } else if (touches) {
+    if (touches) {
       continue;
     } else if (!nearby) {
       if (
+        bodyPixels > 0 &&
         size >= 10 &&
         size <= 0.055 * width * height &&
         w <= width * 0.5 &&
@@ -220,20 +226,24 @@ function lettering(
       for (const i of component) ink[i] = 1;
     }
   }
-  if (boundary || rejected.includes(1) || !ink.includes(1)) {
+  if (rejected.includes(1) || !ink.includes(1)) {
     describe(debug, "source", crop, ink);
     describe(debug, "rejected", crop, rejected);
-    return { reason: boundary ? BOUNDARY : CLEANUP };
+    return { reason: CLEANUP };
   }
   const fringe = dilate(ink, crop, 2);
   const expected = ink.map((value, i) =>
     value ||
-    (fringe[i] && cleanup[i] && !excluded[i] && reference[i] - gray[i] >= 5)
+    (fringe[i] &&
+      cleanup[i] &&
+      !rim[i] &&
+      !excluded[i] &&
+      reference[i] - gray[i] >= 5)
       ? 1
       : 0,
   );
   const constrain = (mask: Uint8Array) =>
-    mask.map((value, i) => (cleanup[i] && !excluded[i] ? value : 0));
+    mask.map((value, i) => (cleanup[i] && !rim[i] && !excluded[i] ? value : 0));
   let mask = constrain(
     dilate(
       expected,
@@ -319,6 +329,38 @@ function lettering(
       ),
     );
   }
+  // If shaded reconstruction still leaves ghosting, overpaint only the
+  // proposed lettering mask. Require a pale, nearly neutral local background.
+  const sourceMask = constrain(dilate(expected, crop, 2));
+  const ring = dilate(sourceMask, crop, 5);
+  const tones: number[] = [];
+  let sampled = 0;
+  for (let i = 0; i < ring.length; i++) {
+    if (!ring[i] || sourceMask[i] || !cleanup[i] || excluded[i]) continue;
+    sampled++;
+    const [r, g, b] = data.subarray(i * 4, i * 4 + 3);
+    if (Math.max(r, g, b) - Math.min(r, g, b) <= 12 && Math.min(r, g, b) >= 210)
+      tones.push(luminance(r, g, b));
+  }
+  if (
+    tones.length >= 16 &&
+    tones.length >= sampled * 0.85 &&
+    sourceMask.reduce((count, pixel) => count + pixel, 0) <= area * 0.45
+  ) {
+    tones.sort((a, b) => a - b);
+    const shade = tones[Math.floor(tones.length * 0.8)];
+    const clean = new Uint8ClampedArray(data);
+    const residual = expected.some(
+      (ink, i) => ink && (!sourceMask[i] || reference[i] - shade > 12),
+    );
+    if (!residual) {
+      for (let i = 0; i < sourceMask.length; i++) {
+        if (sourceMask[i]) clean.fill(shade, i * 4, i * 4 + 3);
+      }
+      describe(debug, "source", crop, sourceMask);
+      return { clean, mask: sourceMask };
+    }
+  }
   if (!debug.rejected?.length) describe(debug, "rejected", crop, expected);
   return { reason: CLEANUP };
 }
@@ -357,7 +399,7 @@ function fit(
     size >= 12;
     size--
   ) {
-    measure.font = `${size}px "${thai ? "MangaLensThai" : "MangaLensCJK"}"`;
+    measure.font = `${size}px "${typesettingFamily(translation)}"`;
     const all = measure.measureText(translation.replace(/\n/g, " "));
     const ascent = Math.ceil(all.actualBoundingBoxAscent),
       descent = Math.ceil(all.actualBoundingBoxDescent);
@@ -570,7 +612,20 @@ export function renderApprovedBubble(original: ImageData, region: Region) {
         region.render.failure_reason || "No translated text was available.",
       ),
     };
-  const cleaned = lettering(data, shape, inside, cleanup, region, debug);
+  const { crossing, rim } = boundaryInk(data, shape);
+  if (crossing) {
+    describe(debug, "rejected", shape, rim);
+    return { debug, reason: BOUNDARY };
+  }
+  const cleaned = lettering(
+    data,
+    shape,
+    inside,
+    cleanup,
+    dilate(rim, shape, 1),
+    region,
+    debug,
+  );
   if (!cleaned.clean) return { debug, reason: cleaned.reason };
   const text = fit(shape, placement, cleaned.clean, region, debug);
   if (!text.glyphs) return { debug, reason: text.reason };

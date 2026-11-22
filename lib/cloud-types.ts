@@ -53,6 +53,7 @@ export const CLOUD_LIMITS = {
   maxImportBytes: 64 * 1024 * 1024,
   maxExpandedBytes: 128 * 1024 * 1024,
   maxTiles: 12,
+  ocrBatch: 3,
   maxRegions: 200,
   leaseMs: 5 * 60 * 1000,
 } as const;
